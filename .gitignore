@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+instance/
+tests/tmp*/
+# Local verification contains values from the supplied business samples.
+tests/test_reports.py
+*.xlsx
+.env
