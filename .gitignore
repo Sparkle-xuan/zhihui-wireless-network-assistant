@@ -1,4 +1,6 @@
 .venv/
+.deps/
+.pip-tmp/
 __pycache__/
 *.pyc
 instance/

@@ -1,9 +1,111 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>智徽 · 黑点报告</title><link rel="stylesheet" href="/static/style.css"></head>
-<body><header><div class="brand"><span class="mark">智</span><div><strong>智徽</strong><small>无线网络感知分析助手</small></div></div><span class="local">本地试运行</span></header>
-<div class="shell"><aside><p>工作台</p><a class="selected" href="#reports">黑点周报与月报</a><span>投诉分析 <small>待建设</small></span><span>黑点数据分析 <small>待建设</small></span><span>挂起库推进 <small>待建设</small></span><span>网络运行情况 <small>待建设</small></span><div class="aside-foot">数据仅在本机处理<br>原始文件不保存</div></aside>
-<main id="reports"><div class="intro"><div><p class="breadcrumb">黑点管理 / 报告生成</p><h1>黑点周报与月报</h1><p>导入两份工单数据，生成报告并核对各地市统计。</p></div><span class="status">本地数据</span></div>
-<div class="layout"><section class="panel"><div class="section-title"><div><h2>导入本期数据</h2><p>使用本周文件。月报通常选择当月最后一个周五的数据。</p></div></div><form id="form"><div class="date-line"><label>统计日期<input name="period" type="date" required></label><p>日期用于保存版本和查找历史快照。</p></div><div class="uploads"><label class="upload"><b>2026 年黑点工单进展表</b><span>包含“汇聚黑点-汇总”和“挂起”</span><input type="file" name="current" accept=".xlsx" required></label><label class="upload"><b>历史黑点工单进展表</b><span>包含 2024 年遗留 94 处明细</span><input type="file" name="legacy" accept=".xlsx" required></label></div>
-<details><summary>补录上周基准 / 报告说明</summary><div class="more"><p>首次使用时填写上周基准；留空将自动使用最近一期已保存数据。</p><div class="fields"><label>上周黑点确认纳入总数<input name="previous_included" type="number" min="0" placeholder="例如 418"></label><label>上周质检合格总数<input name="previous_qualified" type="number" min="0" placeholder="例如 280"></label></div><label>全球通处理补充说明<textarea name="global" rows="2" placeholder="例如未解决区域的进展"></textarea></label><label>挂起原因说明<textarea name="suspended" rows="2" placeholder="填写核实后的地市挂起原因"></textarea></label><label>月报工程及成本优化说明<textarea name="monthly" rows="2" placeholder="填写剩余区域的项目解决计划"></textarea></label><label>2024 年遗留进展说明<textarea name="legacy" rows="2" placeholder="填写未解决原因及督办进展"></textarea></label></div></details><div class="actions"><button type="submit" id="generate">生成报告</button><span>只保存统计汇总，不保存原始文件</span></div></form><div id="error" class="error" role="alert" hidden></div></section>
-<section class="history"><div class="section-title"><div><h2>历史版本</h2><p>点击查看已保存的统计结果</p></div></div><div id="history"><p class="muted">尚无保存的报告</p></div></section></div>
-<section class="result" id="result" hidden><div class="result-heading"><div><h2>统计结果</h2><p id="result-date"></p></div><button type="button" class="secondary" id="download">导出月报 Excel</button></div><div id="warnings" class="warnings"></div><div class="summary" id="summary"></div><div class="tabs"><button class="active" data-tab="weekly" type="button">周报文字</button><button data-tab="monthly" type="button">月报文字</button><button data-tab="cities" type="button">地市统计</button></div><div id="weekly-panel"><p class="hint">可编辑并复制周报文字，编辑内容不会自动保存。</p><textarea id="weekly" rows="16" aria-label="周报文字"></textarea><button class="secondary" id="copy" type="button">复制周报</button></div><div id="monthly-panel" hidden><p class="hint">可编辑月报文字，导出 Excel 时使用当前内容。</p><textarea id="monthly" rows="14" aria-label="月报文字"></textarea></div><div id="cities-panel" hidden><div class="table-wrap"><table><thead><tr><th>地市</th><th>黑点确认纳入</th><th>质检合格</th><th>合格率</th><th>实时未解决投诉</th><th>已解决数</th><th>投诉压降</th></tr></thead><tbody id="city-rows"></tbody></table></div></div></section>
-</main></div><script src="/static/app.js"></script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>黑点周报与月报 · 智徽</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/assistant.css">
+</head>
+<body>
+<svg class="svg-sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <symbol id="i-report" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M5 18l-2 3 .8-5A8.5 8.5 0 1 1 8 19Z"/><path d="M8 10h8M8 14h5"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M20 10c0 5-8 11-8 11S4 15 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="2.5"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20h16M7 17v-5M12 17V6M17 17v-8"/></symbol>
+  <symbol id="i-db" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4m-4 4 4-4 4 4M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16v4ZM13 7l4 4M13 20h7"/></symbol>
+  <symbol id="i-mail" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m4 7 8 6 8-6"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+</svg>
+<div class="app-shell">
+  <aside class="sidebar" aria-label="主导航">
+    <div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><div><strong>智徽</strong><small>无线网络感知分析助手</small></div></div>
+    <div class="nav-label">工作台</div>
+    <nav class="side-nav">
+      <a class="selected" href="#reports" aria-current="page"><svg><use href="#i-report"/></svg><span>黑点周报与月报</span></a>
+      <span><svg><use href="#i-chat"/></svg><span>投诉分析</span><small>待建设</small></span>
+      <span><svg><use href="#i-pin"/></svg><span>黑点数据分析</span><small>待建设</small></span>
+      <span><svg><use href="#i-grid"/></svg><span>挂起库推进</span><small>待建设</small></span>
+      <span><svg><use href="#i-chart"/></svg><span>网络运行情况</span><small>待建设</small></span>
+    </nav>
+    <div class="sidebar-note"><div class="note-dot"></div><div><strong>本地试运行</strong><small>原始文件不保存</small></div></div>
+  </aside>
+  <main id="reports" class="main-content">
+    <header class="page-header"><div><div class="breadcrumb">黑点管理 <span>/</span> 报告生成</div><div class="page-title"><span class="title-mark" aria-hidden="true"><i></i><i></i></span><h1>黑点周报与月报</h1></div><p>汇总工单数据，生成并核对重点投诉区域报告。</p></div><span class="local-badge"><span></span> 本地工作台</span></header>
+
+    <div class="workspace-top">
+      <section class="panel import-panel" aria-labelledby="import-title">
+        <div class="section-head"><span class="section-icon violet"><svg><use href="#i-upload"/></svg></span><div><h2 id="import-title">数据导入</h2><p>选择统计日期并导入工单表</p></div></div>
+        <form id="form">
+          <div class="date-line"><label>统计日期<input name="period" type="date" aria-describedby="date-hint" required></label><p id="date-hint" aria-live="polite">选择本年工单文件后自动识别，也可手动填写。</p></div>
+          <div class="uploads">
+            <label class="upload upload-current"><span class="upload-icon"><svg><use href="#i-upload"/></svg></span><b>本年工单进展表</b><span>周报、月报均需要 · .xlsx</span><input type="file" name="current" accept=".xlsx" required aria-label="选择本年黑点工单进展表"></label>
+            <label class="upload upload-legacy"><span class="upload-icon"><svg><use href="#i-upload"/></svg></span><b>历史工单进展表</b><span>月报需要 · .xlsx</span><input type="file" name="legacy" accept=".xlsx" aria-label="选择历史黑点工单进展表"></label>
+          </div>
+          <details class="supplement"><summary>补录上周基准 / 报告说明</summary><div class="more"><p>周报首次使用时填写上周基准；留空时使用七天前已保存的数据。</p><div class="fields"><label>上周黑点确认纳入总数<input name="previous_included" type="number" min="0" placeholder="填写上周数量"></label><label>上周质检合格总数<input name="previous_qualified" type="number" min="0" placeholder="填写上周数量"></label></div><label>全球通处理补充说明<textarea name="global" rows="2" placeholder="例如未解决区域的进展"></textarea></label><label>挂起原因说明<textarea name="suspended" rows="2" placeholder="填写核实后的地市挂起原因"></textarea></label><label>月报工程及成本优化说明<textarea name="monthly" rows="2" placeholder="填写剩余区域的项目解决计划"></textarea></label><label>2024 年遗留进展说明<textarea name="legacy" rows="2" placeholder="填写未解决原因及督办进展"></textarea></label></div></details>
+          <div class="actions generate-actions"><button type="submit" name="kind" value="weekly"><svg><use href="#i-report"/></svg>生成周报</button><button type="submit" name="kind" value="monthly" class="secondary"><svg><use href="#i-clock"/></svg>生成月报</button><button type="button" id="supplement-statistics" class="secondary">补充周报统计</button></div><p id="supplement-status" class="hint" role="status" aria-live="polite">可用当期原表补充旧周报缺失的汇总，不覆盖报告文字。</p>
+        </form><div id="error" class="error" role="alert" hidden></div>
+      </section>
+
+      <section class="panel history" aria-labelledby="history-title"><div class="section-head"><span class="section-icon lilac"><svg><use href="#i-layers"/></svg></span><div><h2 id="history-title">历史版本</h2><p>已保存的报告记录</p></div></div><div id="history"><p class="history-empty">暂无报告记录<br><small>生成后的报告将显示在这里</small></p></div></section>
+
+      <section class="overview" aria-label="本期统计"><div class="overview-heading"><h2>本期概览</h2><span>生成后更新</span></div><div class="summary" id="summary"><div><small>确认纳入</small><strong>— <em>处</em></strong></div><div><small>质检合格</small><strong>— <em>处</em></strong></div><div><small>合格率</small><strong>—</strong></div><div><small>挂起库</small><strong>— <em>处</em></strong></div></div></section>
+    </div>
+
+    <div class="workspace-bottom">
+      <section class="result" id="result" hidden>
+        <div class="result-heading"><div class="section-head"><span class="section-icon violet"><svg><use href="#i-edit"/></svg></span><div><h2>报告编辑与预览</h2><p id="result-date"></p></div></div><button type="button" class="secondary" id="download">导出月报 Excel</button></div>
+        <div id="warnings" class="warnings"></div>
+        <div class="tabs"><button class="active" data-tab="weekly" type="button">周报文字</button><button data-tab="monthly" type="button">月报文字</button><button data-tab="cities" type="button">地市统计</button></div>
+        <div id="weekly-panel"><p class="hint">修改后请点击“保存修改”，也可以复制周报文字。</p><textarea id="weekly" rows="16" aria-label="周报文字"></textarea><div class="actions report-actions"><button type="button" data-save="weekly">保存修改</button><button class="secondary" id="copy" type="button">复制周报</button><span id="weekly-save-status" role="status"></span><span id="weekly-mail-status" role="status" aria-live="polite"></span><button class="secondary send-action" type="button" data-send="weekly"><svg><use href="#i-mail"/></svg>发送邮件</button></div></div>
+        <div id="monthly-panel" hidden><p class="hint">修改后请点击“保存修改”；导出 Excel 使用当前文字。</p><textarea id="monthly" rows="14" aria-label="月报文字"></textarea><div class="actions report-actions"><button type="button" data-save="monthly">保存修改</button><span id="monthly-save-status" role="status"></span><span id="monthly-mail-status" role="status" aria-live="polite"></span><button class="secondary send-action" type="button" data-send="monthly"><svg><use href="#i-mail"/></svg>发送邮件</button></div></div>
+        <div id="cities-panel" hidden><div class="table-wrap"><table><thead><tr><th>地市</th><th>黑点确认纳入</th><th>质检合格</th><th>合格率</th><th>实时未解决投诉</th><th>已解决数</th><th>投诉压降</th></tr></thead><tbody id="city-rows"></tbody></table></div></div>
+        <section class="mail-panel" id="mail-panel" hidden><details id="mail-details"><summary><svg><use href="#i-mail"/></svg>邮箱设置</summary><p class="hint">填写收件人，核对报告文字后，点击报告旁的“发送邮件”。</p><form id="mail-form"><div class="fields"><label>QQ 发件邮箱<input name="sender" type="email" autocomplete="username" required placeholder="你的 QQ 邮箱"></label><label>收件邮箱<input name="recipient" type="email" required placeholder="输入一个收件地址"></label></div><div class="fields"><label>QQ 邮箱 SMTP 授权码<input name="auth_code" type="password" autocomplete="off" placeholder="已保存时可留空"></label><label>邮件主题<input id="mail-subject" name="subject" type="text" maxlength="200" required></label></div><div class="credential-actions"><button type="button" class="secondary" id="save-mail-credential">保存授权码</button><button type="button" class="secondary" id="delete-mail-credential">删除已保存授权码</button><span id="credential-status" role="status" aria-live="polite"></span></div><p class="hint">可保存一个发件邮箱的授权码到当前 Windows 账户；授权码不存入数据库或项目文件。</p><label id="mail-attachment-option" class="check-label"><input name="attach" type="checkbox"> 附上本期月报 Excel（含当前报告文字和地市统计）</label></form></details></section>
+      </section>
+      <section class="result-empty" id="result-empty"><span class="empty-icon"><svg><use href="#i-report"/></svg></span><div><h2>报告编辑与预览</h2><p>导入工单表并生成报告后，在这里编辑、复制或发送。</p></div></section>
+      <aside class="utility-column">
+        <div class="utility-card"><div class="section-head"><span class="section-icon mint"><svg><use href="#i-check"/></svg></span><div><h2>使用说明</h2><p>开始生成报告</p></div></div><ol class="steps"><li><span>1</span>选择本期工单进展表</li><li><span>2</span>月报额外导入历史表</li><li><span>3</span>核对数据并编辑报告</li></ol><p class="utility-note">月报通常使用当月最后一个周五的数据。</p></div>
+        <details class="database-settings"><summary><span class="section-icon lilac"><svg><use href="#i-db"/></svg></span><span><strong>数据库设置</strong><small>管理本机连接信息</small></span></summary><p class="hint">连接信息保存在当前 Windows 账户；保存后下次启动生效。此处不会更改 PostgreSQL 用户本身的密码。</p><form id="database-form"><div class="fields"><label>数据库用户名<input name="user" type="text" required maxlength="63" autocomplete="off"></label><label>数据库名称<input name="dbname" type="text" required maxlength="63" autocomplete="off"></label></div><label>数据库密码<input name="password" type="password" autocomplete="new-password" placeholder="留空则保留已保存密码"></label><div class="actions"><button type="submit" class="secondary">验证并保存</button><span id="database-status" role="status" aria-live="polite"></span></div></form></details>
+      </aside>
+    </div>
+    <section class="analytics" aria-labelledby="analytics-title">
+      <div class="analytics-heading"><div><h2 id="analytics-title">统计图表</h2><p>基于报告统计结果展示，便于对比和查看变化</p></div><span class="analytics-badge">真实统计数据</span></div>
+      <div class="charts-grid">
+        <section class="chart-card" aria-labelledby="city-chart-title"><div class="chart-heading"><div><h3 id="city-chart-title">地市处理情况</h3><p>当前报告 · 单位：处<span id="city-chart-period"></span></p></div><span class="chart-icon"><svg><use href="#i-chart"/></svg></span></div><div class="chart-legend"><span class="legend-included">确认纳入</span><span class="legend-qualified">质检合格</span></div><div class="chart-area"><p class="chart-empty" id="city-chart-empty">生成或打开报告后，显示各地市统计。</p><div class="chart-viewport chart-scroll" id="city-chart" hidden></div><ul class="sr-only" id="city-chart-data" aria-label="地市统计数据"></ul></div></section>
+        <section class="chart-card" aria-labelledby="trend-chart-title"><div class="chart-heading"><div><h3 id="trend-chart-title">地市解决率趋势</h3><p>查看所选月份内各地市已保存的统计 · 单位：%</p></div><span class="chart-icon mint-icon"><svg><use href="#i-chart"/></svg></span></div><div class="trend-filters"><label>月份<input id="trend-month" type="month" aria-label="选择趋势月份"></label><label>地市<select id="trend-city" aria-label="选择趋势地市"><option value="all">全部地市</option></select></label></div><div class="trend-legend" id="trend-city-legend" aria-label="地市图例"></div><div class="chart-area"><p class="chart-empty" id="trend-chart-empty">所选月份暂无已保存的统计数据。</p><div class="chart-viewport chart-trend" id="trend-chart" hidden></div><ul class="sr-only" id="trend-chart-data" aria-label="地市历史解决率数据"></ul></div><p class="chart-footnote">解决率 = 质检合格数 ÷ 确认纳入数；分母为 0 时显示 0%。已保存期次等间距展示，缺失数据不补零；同日优先使用周报统计。</p></section>
+      </div>
+    </section>
+    <div class="page-footer">智徽 · 无线网络感知分析助手 <span>仅在本机处理数据</span></div>
+  </main>
+</div>
+<div class="assistant-widget" id="assistant-widget">
+  <div id="assistant-pet" class="assistant-pet">
+    <button type="button" id="assistant-launcher" class="assistant-launcher" aria-label="智徽助手，点击显示操作，拖动调整位置" aria-expanded="false" aria-controls="assistant-shortcuts" title="悬停或点击显示操作，拖动移动"><img src="/static/assets/zhihui-assistant.png" alt=""></button>
+    <div id="assistant-shortcuts" class="assistant-shortcuts" role="group" aria-label="助手快捷操作">
+      <button type="button" id="assistant-open-chat" aria-label="打开文字聊天" title="文字聊天"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 18.5V6a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H9l-4 2.5Z"/><path d="M9 9h6M9 12h4"/></svg></button>
+      <span class="assistant-shortcut-divider" aria-hidden="true"></span>
+      <button type="button" id="assistant-open-voice" aria-label="打开语音输入" title="语音输入"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3m-3 0h6"/></svg></button>
+    </div>
+  </div>
+  <section id="assistant-panel" class="assistant-panel" aria-labelledby="assistant-title" hidden>
+    <header class="assistant-header"><img src="/static/assets/zhihui-assistant.png" alt=""><div><h2 id="assistant-title">智徽小助手</h2><p>无线网络问答</p></div><button type="button" id="assistant-close" class="assistant-icon-button" aria-label="关闭问答窗口">×</button></header>
+    <div class="assistant-body">
+      <div class="assistant-intro"><strong>你好，我是智徽</strong><p>可以向我提问 4G/5G 网络或报告相关问题。</p></div>
+      <details class="assistant-settings" id="assistant-settings"><summary>DeepSeek 设置 <span id="assistant-key-status">检查中</span></summary><p>密钥保存在当前 Windows 账户的凭据管理器中，不会显示或提交到项目文件。</p><form id="assistant-key-form"><label>DeepSeek API 密钥<input id="assistant-key" type="password" autocomplete="off" placeholder="输入密钥后保存"></label><div class="assistant-settings-actions"><button type="submit">保存密钥</button><button type="button" id="assistant-key-delete" class="assistant-quiet">删除密钥</button></div><p id="assistant-key-message" role="status" aria-live="polite"></p></form></details>
+      <ol id="assistant-messages" class="assistant-messages" aria-label="聊天记录" aria-live="polite"></ol>
+      <p id="assistant-status" class="assistant-status" role="status" aria-live="polite"></p>
+    </div>
+    <div class="assistant-composer">
+      <form id="assistant-form"><label class="sr-only" for="assistant-input">输入问题</label><textarea id="assistant-input" rows="2" maxlength="5000" placeholder="输入问题，或点击麦克风说话"></textarea><div class="assistant-composer-actions"><button type="button" id="assistant-mic" class="assistant-mic" aria-label="语音输入" title="语音输入"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3m-3 0h6"/></svg><span>语音输入</span></button><button type="submit" id="assistant-send" class="assistant-send">发送</button></div></form>
+    </div>
+  </section>
+</div>
+<script src="/static/report-date.js"></script><script src="/static/charts.js"></script><script src="/static/trend.js"></script><script src="/static/app.js"></script><script src="/static/database-settings.js"></script><script src="/static/assistant-utils.js"></script><script src="/static/assistant.js"></script>
+</body></html>

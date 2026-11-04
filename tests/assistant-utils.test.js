@@ -1,0 +1,10 @@
+const assert=require('assert');
+const u=require('../static/assistant-utils.js');
+assert.deepStrictEqual(u.launcherPosition(-50,900,{width:800,height:600},{width:80,height:80}),{x:8,y:512});
+assert.deepStrictEqual(u.panelPosition({right:790,top:550,bottom:590},{width:390,height:400},{width:800,height:600}),{x:398,y:138});
+const history=Array.from({length:16},(_,i)=>({role:i%2?'assistant':'user',content:String(i)}));
+const messages=u.messagesForRequest(history,'新问题');
+assert.equal(messages.length,11);
+assert.equal(messages[0].content,'6');
+assert.equal(messages[messages.length-1].content,'新问题');
+console.log('assistant utility tests passed');

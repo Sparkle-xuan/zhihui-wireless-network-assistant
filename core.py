@@ -34,18 +34,23 @@ def read_rows(sheet, fields):
 def percentage(n,d): return n/d if d else 0
 def fmt(n): return f'{n*100:.2f}%'
 
-def analyze(current, legacy):
+def analyze(current, legacy=None):
+    w = old = None
     try:
         w=load_workbook(current,read_only=True,data_only=True)
-        old=load_workbook(legacy,read_only=True,data_only=True)
-    except Exception as exc: raise ValueError('无法读取 Excel，请确认文件为未损坏的 .xlsx 格式。') from exc
+        if legacy is not None: old=load_workbook(legacy,read_only=True,data_only=True)
+    except Exception as exc:
+        if w: w.close()
+        raise ValueError('无法读取 Excel，请确认文件为未损坏的 .xlsx 格式。') from exc
     try:
-        if '汇聚黑点-汇总' not in w or '挂起' not in w or '汇聚黑点-汇总' not in old:
+        if '汇聚黑点-汇总' not in w or '挂起' not in w or (old is not None and '汇聚黑点-汇总' not in old):
             raise ValueError('缺少必要工作表：2026 文件需要「汇聚黑点-汇总」「挂起」，历史文件需要「汇聚黑点-汇总」。')
         rows=list(read_rows(w['汇聚黑点-汇总'],['city','included','status','before','after','five','priority','cost','stage','first','second']))
         suspended=list(read_rows(w['挂起'],['city','category']))
-        legacy_rows=list(read_rows(old['汇聚黑点-汇总'],['kind','status','coord']))
-    finally: w.close(); old.close()
+        legacy_rows=list(read_rows(old['汇聚黑点-汇总'],['kind','status','coord'])) if old is not None else None
+    finally:
+        w.close()
+        if old is not None: old.close()
     unknown=sorted({str(r['city']) for r in rows if r['city'] and r['city'] not in CITIES})
     if unknown: raise ValueError('存在无法识别的地市：'+ '、'.join(unknown[:20]))
     city_rows=[]
@@ -64,11 +69,14 @@ def analyze(current, legacy):
     global_rows=[r for r in rows if r['included']=='是' and r['priority']=='全球通']
     gb=sum(r['status'] in ('评估环节','归档') for r in global_rows)
     suspended_city=Counter(str(r['city']) for r in suspended if r['city']); categories=Counter(str(r['category']) for r in suspended if r['category'])
-    prior=[r for r in legacy_rows if r['kind']=='遗留94处']; done=sum(r['status'] in ('评估环节','归档') for r in prior); coordination=sum(r['status']=='地市处理' and r['coord']=='是' for r in prior)
+    legacy_result=None
+    if legacy_rows is not None:
+        prior=[r for r in legacy_rows if r['kind']=='遗留94处']; done=sum(r['status'] in ('评估环节','归档') for r in prior); coordination=sum(r['status']=='地市处理' and r['coord']=='是' for r in prior)
+        legacy_result={'count':94,'done':done,'remaining':94-done,'coordination':coordination,'other':94-done-coordination,'rate':percentage(done,94)}
     def aggregate(rr):
         b=sum(number(r['before']) for r in rr); a=sum(number(r['after']) for r in rr)
         return {'before':b,'after':a,'reduction':abs(a/b-1) if b else 0}
-    return {'cities':city_rows,'total':total,'qualified_complaints':aggregate(qualified_rows),'archive':{'count':len(archived),**aggregate(archived)},'global':{'count':len(global_rows),'qualified':gb,'rate':percentage(gb,len(global_rows)),'opening':sum(r['status'] in ('地市处理','结果质检') and r['stage'] in ('站点开通','设备安装') for r in global_rows)},'suspended':{'count':len(suspended),'cities':suspended_city.most_common(),'categories':dict(categories)},'legacy':{'count':94,'done':done,'remaining':94-done,'coordination':coordination,'other':94-done-coordination,'rate':percentage(done,94)}}
+    return {'cities':city_rows,'total':total,'qualified_complaints':aggregate(qualified_rows),'archive':{'count':len(archived),**aggregate(archived)},'global':{'count':len(global_rows),'qualified':gb,'rate':percentage(gb,len(global_rows)),'opening':sum(r['status'] in ('地市处理','结果质检') and r['stage'] in ('站点开通','设备安装') for r in global_rows)},'suspended':{'count':len(suspended),'cities':suspended_city.most_common(),'categories':dict(categories)},'legacy':legacy_result}
 
 def reports(data, period, previous, notes):
     t=data['total']; q=data['qualified_complaints']; a=data['archive']; g=data['global']; h=data['suspended']; l=data['legacy']
@@ -79,7 +87,9 @@ def reports(data, period, previous, notes):
     cats='，'.join(f'{name}{count}处' for name,count in h['categories'].items()) or '暂无分类数据'
     weekly=f'四、2026年重点投诉区域情况\n1、总体情况：本周新增{week_new}处重点投诉区域入库，总体重点投诉区域入库{t["included"]}处，目前全量重点投诉区域已质检合格{t["qualified"]}处（本周解决{week_solved}处），质检合格率{fmt(t["rate"])}。已质检合格重点投诉区域整治前累计关联未解决投诉{q["before"]}件，整治后未解决投诉{q["after"]}件，投诉压降{fmt(q["reduction"])}。其中经过三个月观察期已归档{a["count"]}处，关联的未解决投诉从{a["before"]}减少到{a["after"]}个，压降{fmt(a["reduction"])}。遗留重点投诉区域中按照整治进展来看，目前{stages}；\n2、全球通白金卡、钻石卡用户投诉入库管理：累计入库{g["count"]}处，目前已质检合格{g["qualified"]}处，解决率{fmt(g["rate"])}，站点开通及设备安装{g["opening"]}处。{notes.get("global", "")}\n3、重点投诉区域挂起库：目前挂起库中存在{h["count"]}处，地市分布靠前的为{ranked}。挂起重点投诉区域中按照归属类别来看，{cats}。{notes.get("suspended", "")}'
     remaining=t['included']-t['qualified']
-    monthly=f'四、重点投诉区域处理情况\n截至{period[:7]}，全省汇聚重点投诉区域{t["included"]}个，其中已整治完成{t["qualified"]}处，解决率{fmt(t["rate"])}，剩余{remaining}处。{notes.get("monthly", "工程及成本优化项目解决情况待补充。")}\n\n全球通白金卡、钻石卡用户投诉入库管理：累计入库{g["count"]}处，目前已质检合格{g["qualified"]}处，解决率{fmt(g["rate"])}，站点开通及设备安装{g["opening"]}处。{notes.get("global", "")}\n\n按照巡视反馈情况，2024年未如期解决投诉黑点94处，截至目前已解决{l["done"]}处，整体解决率{fmt(l["rate"])}；遗留未解决{l["remaining"]}处，其中{l["other"]}处整治效果待完善，{l["coordination"]}处存在协调问题。{notes.get("legacy", "具体进展及附件清单待补充。")}'
+    monthly=None
+    if l is not None:
+        monthly=f'四、重点投诉区域处理情况\n截至{period[:7]}，全省汇聚重点投诉区域{t["included"]}个，其中已整治完成{t["qualified"]}处，解决率{fmt(t["rate"])}，剩余{remaining}处。{notes.get("monthly") or "工程及成本优化项目解决情况待补充。"}\n\n全球通白金卡、钻石卡用户投诉入库管理：累计入库{g["count"]}处，目前已质检合格{g["qualified"]}处，解决率{fmt(g["rate"])}，站点开通及设备安装{g["opening"]}处。{notes.get("global", "")}\n\n按照巡视反馈情况，2024年未如期解决投诉黑点94处，截至目前已解决{l["done"]}处，整体解决率{fmt(l["rate"])}；遗留未解决{l["remaining"]}处，其中{l["other"]}处整治效果待完善，{l["coordination"]}处存在协调问题。{notes.get("legacy") or "具体进展及附件清单待补充。"}'
     return weekly,monthly
 
 def export_monthly(data, report, period):
