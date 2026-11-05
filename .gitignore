@@ -9,3 +9,23 @@ tests/tmp*/
 tests/test_reports.py
 *.xlsx
 .env
+
+# Business source files and local databases must stay on this computer.
+*.csv
+*.tsv
+*.xls
+*.xlsm
+*.xlsb
+*.ods
+*.sqlite
+*.sqlite3
+*.db
+
+# Generated reports, local secrets and database backups.
+*.docx
+.env.*
+*.pem
+*.key
+*.pgpass
+*.dump
+*.bak

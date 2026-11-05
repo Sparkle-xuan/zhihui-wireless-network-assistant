@@ -3,15 +3,19 @@ import json
 import math
 import re
 from datetime import date, timedelta
+from fractions import Fraction
 from core import CITIES, STAGES
+from network_query import NETWORK_TOOL
 
 METRICS=('解决率','确认纳入数','质检合格数','汇聚黑点量','平台关联投诉量','已纳入关联投诉量','关联投诉量','项目进展')
 SCALAR_FIELDS={'汇聚黑点量':('platform','处'),'平台关联投诉量':('platform_complaints','件'),'已纳入关联投诉量':('complaints','件')}
 
 TOOLS = [
     {'type':'function','function':{'name':'query_city_metrics','description':'按月份查询全省或地市的黑点汇聚量、关联投诉量、项目进展、确认纳入数、质检合格数或解决率；项目进展应使用项目进展，不可用解决率替代。', 'parameters':{'type':'object','properties':{'month':{'type':'string','description':'用户明确表达或上下文可确定的月份，格式 YYYY-MM'},'city':{'type':'string','description':'全省、全部地市或具体地市名'},'metric':{'type':'string','enum':list(METRICS),'description':'用户请求的指标；关联投诉量口径不明时选关联投诉量，同时查询两种口径'}},'required':['month','city','metric']}}},
-    {'type':'function','function':{'name':'query_suspended','description':'仅查询挂起库总数量或地市分布，不查询类别、原因、申请挂起或跨月对比。', 'parameters':{'type':'object','properties':{'month':{'type':'string','description':'用户明确表达或上下文可确定的月份，格式 YYYY-MM'},'city':{'type':'string','description':'全省、全部地市或具体地市名'}},'required':['month','city']}}},
+    {'type':'function','function':{'name':'query_suspended','description':'查询挂起库（申请挂起）数量或地市分布；不查询类别、原因或跨月对比。', 'parameters':{'type':'object','properties':{'month':{'type':'string','description':'用户明确表达或上下文可确定的月份，格式 YYYY-MM'},'city':{'type':'string','description':'全省、全部地市或具体地市名'}},'required':['month','city']}}},
 ]
+
+TOOLS.append(NETWORK_TOOL)
 
 def identify_explicit_metric(question):
     """Recognize explicit business terms; None leaves interpretation to the model."""
@@ -24,7 +28,7 @@ def identify_explicit_metric(question):
         elif re.search(r'平台|汇聚',text): candidates.add('平台关联投诉量')
         else: candidates.add('关联投诉量')
     elif re.search(r'汇聚黑点|黑点汇聚|平台黑点|平台汇聚',text): candidates.add('汇聚黑点量')
-    if re.search(r'解决率|合格率',text): candidates.add('解决率')
+    if re.search(r'解决率|合格率|黑点解决情况|重点投诉区域解决情况',text): candidates.add('解决率')
     if re.search(r'质检合格(?:数|量|多少|几处)',text): candidates.add('质检合格数')
     if re.search(r'(?:确认|已)纳入(?:数|量|多少|几处)',text) and '关联投诉量' not in candidates and '已纳入关联投诉量' not in candidates: candidates.add('确认纳入数')
     return next(iter(candidates)) if len(candidates)==1 else '多个指标' if len(candidates)>1 else None
@@ -35,8 +39,8 @@ def local_query_plan(messages):
     if any(not isinstance(m,dict) or m.get('role') not in ('user','assistant') or not isinstance(m.get('content'),str) or not 1<=len(m['content'].strip())<=5000 for m in messages): return None
     if sum(len(m['content']) for m in messages)>24000 or messages[-1]['role']!='user': return None
     question=messages[-1]['content'];metric=identify_explicit_metric(question)
-    if metric=='多个指标' or re.search(r'怎么算|怎么计算|口径|什么意思|区别|定义|对比|比较|相比|环比|同比|上月|上个月|排名|第几|最多|最少|最高|最低|原因|类别|申请挂起',question): return None
-    suspended=bool(re.search(r'挂起库|挂起(?:的)?数量|挂起多少|挂起数',question))
+    if metric=='多个指标' or re.search(r'怎么算|怎么计算|口径|什么意思|区别|定义|对比|比较|相比|环比|同比|上月|上个月|排名|第几|最多|最少|最高|最低|原因|类别',question): return None
+    suspended=bool(re.search(r'挂起库|申请挂起|挂起(?:的)?数量|挂起多少|挂起数',question))
     if suspended and metric: return None
     if not metric and not suspended: return None
     matches=re.findall(r'(?<!\d)(20\d{2})\s*(?:年|[-/])\s*(1[0-2]|0?[1-9])\s*月?',question)
@@ -77,7 +81,7 @@ def _city(value):
     if value not in CITIES: raise ValueError('未识别地市，请选择安徽省 16 个地市之一。')
     return value
 
-def query(connect, name, arguments, *, structured=False):
+def query(connect, name, arguments, *, structured=False, source_reader=None):
     def output(reply,headers=None,rows=None,footnote=None,available=True):
         if not structured: return reply
         result={'reply':reply,'available':available}
@@ -91,8 +95,11 @@ def query(connect, name, arguments, *, structured=False):
     metric=arguments.get('metric')
     if name=='query_city_metrics' and metric not in METRICS:
         raise ValueError('暂不支持该指标，请确认要查询的统计口径。')
-    with connect() as c:
-        row=c.execute('SELECT data,monthly_data,weekly,monthly FROM reports WHERE period=?',(period,)).fetchone()
+    if source_reader:
+        row=source_reader(period)
+    else:
+        with connect() as c:
+            row=c.execute('SELECT data,monthly_data,weekly,monthly FROM reports WHERE period=?',(period,)).fetchone()
     if not row or not (row[2] or row[3]):
         return output(f'{arguments["month"]}缺少最后一个周五（{period}）的报告统计，请导入该期工单表生成报告。',available=False)
     try:
@@ -174,8 +181,12 @@ def query(connect, name, arguments, *, structured=False):
         return output(title+'\n'+metric+'\n'+'\n'.join(lines)+'\n口径：解决率 = 质检合格数 ÷ 确认纳入数；数据来源：汇聚黑点-汇总。')
     suspended=snapshot.get('suspended')
     if not isinstance(suspended,dict) or 'count' not in suspended: raise ValueError('该期缺少挂起库统计，请重新导入该期表格。')
+    # Both labels describe the same metric; independently collected totals must agree.
     if city=='全省':
         count=_count(suspended['count'])
+        total=snapshot.get('total')
+        if isinstance(total,dict) and 'suspended' in total and _count(total['suspended'])!=count:
+            return output(f'{period}挂起数据来源不一致：挂起工作表与汇聚表的申请挂起数量不同，请核对原表。',available=False)
         return output(f'截至{int(period[:4])}年{int(period[5:7])}月，全省挂起库累计{count:g}处。\n统计日期：{period}；数据来源：挂起工作表。')
     else:
         values=suspended.get('cities')
@@ -183,7 +194,46 @@ def query(connect, name, arguments, *, structured=False):
         try:
             distribution={name:_count(n) for name,n in values if name in CITIES}
         except (ValueError,TypeError): raise ValueError('该期挂起库地市数据格式异常，请核对报告。')
+        raw_cities=snapshot.get('cities')
+        if isinstance(raw_cities,list):
+            other={r.get('city'):r['suspended'] for r in raw_cities if isinstance(r,dict) and r.get('city') in CITIES and 'suspended' in r}
+            selected=CITIES if city=='全部地市' else [city]
+            if any(name in other and _count(other[name])!=distribution.get(name,0) for name in selected):
+                return output(f'{period}挂起数据来源不一致：部分地市在挂起工作表和汇聚表中的数量不同，请核对原表。',available=False)
         lines=[f'{name}：{distribution.get(name,0):g} 处' for name in (CITIES if city=='全部地市' else [city])]
         if city=='全部地市' and structured:
             return output(f'截至{period}，全省挂起库累计{_count(suspended["count"]):g}处。各地市情况如下：',['地市','挂起库数量（处）'],[[name,f'{distribution.get(name,0):g}'] for name in CITIES],'数据来源：挂起工作表。')
     return output(f'截至{period}，{city}市挂起库累计{distribution.get(city,0):g}处。\n数据来源：挂起工作表（{kind}快照）。')
+
+
+def highest_resolution_plan(question):
+    text=re.sub(r'\s+','',question)
+    if not re.search(r'(?:黑点|重点投诉区域)',text) or not re.search(r'解决率|质检合格率',text) or not re.search(r'最高|第一|第1',text):return None
+    if re.search(r'最低|倒数|前[二三四五六七八九十0-9]|后[二三四五六七八九十0-9]|同比|环比|上月|较上|对比|比较|相比|原因|哪些指标',text) or any(city in text for city in CITIES):
+        return {'error':'请明确查询全省各地市某个月的最高黑点解决率；其他排名或对比请分别提问。'}
+    matches=re.findall(r'(?<!\d)(20\d{2})\s*(?:年|[-/])\s*(1[0-2]|0?[1-9])\s*月?',text)
+    if len(matches)==1:month=f'{matches[0][0]}-{int(matches[0][1]):02d}'
+    else:
+        months=re.findall(r'(?<!\d)(1[0-2]|0?[1-9])月',text)
+        if len(matches)>1 or len(months)!=1:return {'error':'请指定一个统计月份，例如“2026年10月哪个地市黑点解决率最高”。'}
+        month=f'{date.today().year}-{int(months[0]):02d}'
+    return {'month':month}
+
+def highest_resolution(connect,month,*,source_reader=None):
+    result=query(connect,'query_city_metrics',{'month':month,'city':'全部地市','metric':'解决率'},structured=True,source_reader=source_reader)
+    if not result.get('available') or not result.get('table'):return result
+    ranking=[]; excluded=[]
+    for city,included,qualified,_ in result['table']['rows']:
+        base=Fraction(included);passed=Fraction(qualified)
+        if passed>base:raise ValueError('存在质检合格数大于纳入数的地市，无法确定排名，请核对统计数据。')
+        if not base:excluded.append(city);continue
+        ranking.append((passed/base,city,included,qualified))
+    if not ranking:return {'reply':f'{month}各地市均无确认纳入黑点，无法计算最高解决率。','available':False}
+    best=max(r[0] for r in ranking);winners=[r for r in ranking if r[0]==best]
+    names='、'.join(r[1]+'市' for r in winners)
+    detail='；'.join(f'{city}质检合格{passed}处／确认纳入{base}处' for _,city,base,passed in winners)
+    period=_last_friday(month)
+    reply=f"截至{period}，{month}黑点解决率最高的是{names}，{'并列' if len(winners)>1 else ''}{float(best)*100:.2f}%。{detail}。"
+    note='解决率＝质检合格数÷确认纳入数；按未四舍五入的比率判断并列。'
+    if excluded:note+='确认纳入为零的地市不参与排名：'+'、'.join(excluded)+'。'
+    return {'reply':reply,'evidence':note+' 数据日期：'+period+'。','table':result['table'],'available':True}

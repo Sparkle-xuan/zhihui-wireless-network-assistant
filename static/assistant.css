@@ -94,3 +94,5 @@
 .assistant-settings-actions button{font-size:13px;line-height:1.4}
 @media(max-width:480px){.assistant-message{font-size:15px;line-height:1.75}.assistant-intro strong{font-size:19px}.assistant-table-wrap table{font-size:13px}}
 .assistant-message.user .assistant-message-meta{display:none}
+
+.assistant-header{cursor:grab;touch-action:none;user-select:none}.assistant-header:active{cursor:grabbing}.assistant-header button{cursor:pointer}.assistant-header:focus-visible{outline:3px solid #b9a9ff;outline-offset:-3px}

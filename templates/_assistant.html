@@ -1,0 +1,22 @@
+<div class="assistant-widget" id="assistant-widget">
+  <div id="assistant-pet" class="assistant-pet">
+    <button type="button" id="assistant-launcher" class="assistant-launcher" aria-label="智徽助手，点击显示操作，拖动调整位置" aria-expanded="false" aria-controls="assistant-shortcuts" title="悬停或点击显示操作，拖动移动"><img src="/static/assets/zhihui-assistant.png" alt=""></button>
+    <div id="assistant-shortcuts" class="assistant-shortcuts" role="group" aria-label="助手快捷操作">
+      <button type="button" id="assistant-open-chat" aria-label="打开文字聊天" title="文字聊天"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 18.5V6a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H9l-4 2.5Z"/><path d="M9 9h6M9 12h4"/></svg></button>
+      <span class="assistant-shortcut-divider" aria-hidden="true"></span>
+      <button type="button" id="assistant-open-voice" aria-label="打开语音输入" title="语音输入"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3m-3 0h6"/></svg></button>
+    </div>
+  </div>
+  <section id="assistant-panel" class="assistant-panel" aria-labelledby="assistant-title" hidden>
+    <header class="assistant-header"><img src="/static/assets/zhihui-assistant.png" alt=""><div><h2 id="assistant-title">智徽小助手</h2><p>无线网络问答</p></div><button type="button" id="assistant-close" class="assistant-icon-button" aria-label="关闭问答窗口">×</button></header>
+    <div class="assistant-body">
+      <div class="assistant-intro"><strong>你好，我是智徽</strong><p>可以向我提问 4G/5G 网络或报告相关问题。</p></div>
+      <details class="assistant-settings" id="assistant-settings"><summary>DeepSeek 设置 <span id="assistant-key-status">检查中</span></summary><p>密钥保存在当前 Windows 账户的凭据管理器中，不会显示或提交到项目文件。</p><form id="assistant-key-form"><label>DeepSeek API 密钥<input id="assistant-key" type="password" autocomplete="off" placeholder="输入密钥后保存"></label><div class="assistant-settings-actions"><button type="submit">保存密钥</button><button type="button" id="assistant-key-delete" class="assistant-quiet">删除密钥</button></div><p id="assistant-key-message" role="status" aria-live="polite"></p></form></details>
+      <ol id="assistant-messages" class="assistant-messages" aria-label="聊天记录" aria-live="polite"></ol>
+      <p id="assistant-status" class="assistant-status" role="status" aria-live="polite"></p>
+    </div>
+    <div class="assistant-composer">
+      <form id="assistant-form"><label class="sr-only" for="assistant-input">输入问题</label><textarea id="assistant-input" rows="2" maxlength="5000" placeholder="输入问题，或点击麦克风说话"></textarea><div class="assistant-composer-actions"><button type="button" id="assistant-mic" class="assistant-mic" aria-label="语音输入" title="语音输入"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3m-3 0h6"/></svg><span>语音输入</span></button><button type="submit" id="assistant-send" class="assistant-send">发送</button></div></form>
+    </div>
+  </section>
+</div>

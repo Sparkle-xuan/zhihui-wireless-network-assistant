@@ -2,6 +2,7 @@ import json
 import os
 import re
 import sqlite3
+import smtplib
 import sys
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -12,8 +13,17 @@ from core import analyze, reports, export_monthly, CITIES
 from mailing import send_report
 from assistant_service import complete as complete_chat
 from assistant_service import plan_query, summarize_query, validate_model, DEFAULT_MODEL
-from smart_query import query as query_statistics, identify_explicit_metric, local_query_plan
+from smart_query import query as query_statistics, identify_explicit_metric, local_query_plan, highest_resolution_plan, highest_resolution
 import credential_store
+from network_daily_store import import_history
+import network_daily
+import network_query
+import query_context
+import analysis_planner
+import ranking_planner
+import wren_daily_bridge
+import network_document
+import suspension
 
 app=Flask(__name__,instance_relative_config=True)
 app.config['MAX_CONTENT_LENGTH']=30*1024*1024
@@ -48,6 +58,191 @@ def connect():
 
 @app.get('/')
 def index(): return render_template('index.html')
+
+@app.get('/network')
+def network_page(): return render_template('network.html')
+
+@app.get('/suspension')
+def suspension_page(): return render_template('suspension.html')
+
+def suspension_last_friday(month):
+    import calendar
+    suspension.previous_month(month)  # Validate the input format and month.
+    year,number=map(int,month.split('-'))
+    end=date(year,number,calendar.monthrange(year,number)[1])
+    return (end-timedelta(days=(end.weekday()-4)%7)).isoformat()
+
+def ensure_suspension_manual(c):
+    c.execute('CREATE TABLE IF NOT EXISTS suspension_manual (month TEXT PRIMARY KEY, snapshot TEXT NOT NULL)')
+
+@app.get('/api/suspension/periods')
+def suspension_periods():
+    with connect() as c:
+        ensure_suspension_manual(c)
+        rows=c.execute("SELECT period,weekly,monthly FROM reports WHERE weekly <> '' OR monthly <> '' ORDER BY period DESC").fetchall()
+        manual=c.execute('SELECT month FROM suspension_manual ORDER BY month DESC').fetchall()
+    months={}
+    for period,weekly,monthly in rows:
+        try:
+            if date.fromisoformat(period).isoformat()!=period:continue
+            month=period[:7];expected=suspension_last_friday(month)
+        except (ValueError,TypeError):continue
+        entry=months.setdefault(month,{'month':month,'available':False,'expected_period':expected})
+        if period==expected and (weekly or monthly):entry['available']=True
+    for (month,) in manual:
+        try:expected=suspension_last_friday(month)
+        except (ValueError,TypeError):continue
+        entry=months.setdefault(month,{'month':month,'available':False,'expected_period':expected})
+        entry['available']=True
+    return jsonify(sorted(months.values(),key=lambda x:x['month'],reverse=True))
+
+def suspension_month_snapshot(c,month):
+    period=suspension_last_friday(month)
+    row=c.execute('SELECT data,monthly_data,weekly,monthly FROM reports WHERE period=?',(period,)).fetchone()
+    if row:
+        data,monthly_data,weekly,monthly=row
+        if weekly:return suspension.summary(data,period,'weekly')
+        if monthly:return suspension.summary(monthly_data or data,period,'monthly')
+    ensure_suspension_manual(c)
+    manual=c.execute('SELECT snapshot FROM suspension_manual WHERE month=?',(month,)).fetchone()
+    return suspension.summary(manual[0],None,'manual') if manual else None
+
+@app.post('/api/suspension/manual')
+def suspension_manual_save():
+    try:
+        payload=request.get_json() or {}
+        if not isinstance(payload,dict):raise ValueError('数据格式无效。')
+        month=payload.get('month');suspension_last_friday(month)
+        total=payload.get('total');cities=payload.get('cities');categories=payload.get('categories')
+        if not suspension._count(total) or not isinstance(cities,dict) or not isinstance(categories,dict):raise ValueError('请填写有效月份、总数和汇总数据。')
+        if any(name not in CITIES or not suspension._count(value) for name,value in cities.items()):raise ValueError('地市名称或数量无效。')
+        if any(not isinstance(name,str) or not name.strip() or len(name)>100 or not suspension._count(value) for name,value in categories.items()):raise ValueError('分类名称或数量无效。')
+        if sum(cities.values())>total or sum(categories.values())>total:raise ValueError('地市或分类数量之和不能超过总数。')
+        group={'count':total,'cities':list(cities.items()),'categories':categories,'partial_cities':len(cities)!=len(CITIES) or sum(cities.values())!=total}
+        encoded=json.dumps({'suspended':group},ensure_ascii=False)
+        with connect() as c:
+            ensure_suspension_manual(c)
+            if c.execute('SELECT month FROM suspension_manual WHERE month=?',(month,)).fetchone():return jsonify({'error':'该月份已有补录汇总，为避免覆盖请先核对。'}),409
+            c.execute('INSERT INTO suspension_manual (month,snapshot) VALUES (?,?)',(month,encoded))
+        return jsonify({'ok':True})
+    except (ValueError,TypeError) as exc:return jsonify({'error':str(exc) or '数据格式无效。'}),400
+
+@app.get('/api/suspension/month/<month>')
+def suspension_month_data(month):
+    try:
+        previous=suspension.previous_month(month)
+        with connect() as c:
+            current=suspension_month_snapshot(c,month)
+            if not current:return jsonify({'error':f"该月缺少最后一个周五（{suspension_last_friday(month)}）的周报或同日月报数据，请先生成并保存。"}),404
+            try:before=suspension_month_snapshot(c,previous);previous_error=''
+            except ValueError:before=None;previous_error='上月月末统计数据缺失或异常，无法比较。'
+        current['month']=month
+        current['warning_cities']=suspension.top_cities(current)
+        current['comparison']=suspension.compare(current,before,previous)
+        if previous_error:current['comparison']['note']=previous_error
+        return jsonify(current)
+    except ValueError as exc:return jsonify({'error':str(exc)}),422
+
+@app.get('/api/network/dates')
+def network_dates():
+    with connect() as c: result=network_daily.dates(c)
+    return jsonify({'dates':result})
+
+@app.get('/api/network/day/<day>')
+def network_day(day):
+    try:
+        with connect() as c: result=network_daily.detail(c,day)
+        return jsonify(result)
+    except ValueError as exc: return jsonify({'error':str(exc)}),400
+
+@app.get('/api/network/day/<day>/original/<version>')
+def network_original(day,version):
+    try:
+        with connect() as c: text=network_daily.original(c,day,version)
+        return jsonify({'content':text,'historical_tables':network_daily.parse_historical_tables(text),'blocks':network_document.from_text(text)})
+    except ValueError as exc: return jsonify({'error':str(exc)}),400
+
+@app.get('/api/network/day/<day>/document')
+def network_document_get(day):
+    try:
+        network_daily.validate_date(day)
+        with connect() as c:
+            data=network_daily.detail(c,day)
+            blocks,updated=network_document.load(c,day)
+        source='structured'
+        if blocks is None:
+            source='legacy' if data['draft'] is not None else 'original'
+            text=data['draft'] if data['draft'] is not None else data['original']
+            blocks=network_document.from_text(text) if text else []
+        return jsonify({'blocks':blocks,'source':source,'updated_at':updated})
+    except ValueError as exc: return jsonify({'error':str(exc)}),400
+
+@app.post('/api/network/day/<day>/document')
+def network_document_save(day):
+    try:
+        network_daily.validate_date(day);payload=request.get_json(silent=True)
+        if not isinstance(payload,dict): raise ValueError('日报格式无效。')
+        with connect() as c: updated=network_document.save(c,day,payload.get('blocks'))
+        return jsonify({'ok':True,'updated_at':updated})
+    except (ValueError,TypeError) as exc: return jsonify({'error':str(exc)}),400
+
+@app.post('/api/network/day/<day>/document-word')
+def network_document_word(day):
+    try:
+        network_daily.validate_date(day);payload=request.get_json(silent=True)
+        if not isinstance(payload,dict): raise ValueError('日报格式无效。')
+        from network_word import export_word
+        data=export_word(payload.get('blocks'))
+        return send_file(data,as_attachment=True,download_name=f'全省无线网络运行日报-{day}.docx',mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    except ModuleNotFoundError:
+        return jsonify({'error':'缺少 Word 导出组件，请按项目说明安装 python-docx。'}),500
+    except (ValueError,TypeError) as exc: return jsonify({'error':str(exc)}),400
+
+@app.post('/api/network/day/<day>/document-email')
+def network_document_email(day):
+    try:
+        network_daily.validate_date(day);payload=request.get_json(silent=True)
+        if not isinstance(payload,dict): raise ValueError('邮件请求格式无效。')
+        fields=[payload.get(k,'') for k in ('sender','recipient','auth_code','subject')]
+        if not all(isinstance(field,str) for field in fields): raise ValueError('邮件字段格式无效。')
+        if not fields[2]: fields[2]=credential_store.get_for_sender(fields[0]) or ''
+        if not fields[2]: raise ValueError('没有该发件邮箱已保存的授权码，请先填写或保存。')
+        plain,formatted=network_document.email_parts(payload.get('blocks'))
+        send_report(*fields,plain,html_body=formatted)
+        return jsonify({'ok':True,'message':'QQ 邮箱服务器已接受图文表格邮件，请在发件箱核对。'})
+    except (ValueError,TypeError,RuntimeError) as exc: return jsonify({'error':str(exc) or '邮件信息无效。'}),400
+
+@app.post('/api/network/day/<day>/generate')
+def network_generate(day):
+    try:
+        with connect() as c: data=network_daily.detail(c,day)
+        content=network_daily.build_draft(data)
+        return jsonify({'content':content,'blocks':network_document.stat_document(data,content)})
+    except ValueError as exc: return jsonify({'error':str(exc)}),400
+
+@app.post('/api/network/day/<day>/save')
+def network_save(day):
+    try:
+        payload=request.get_json(silent=True)
+        if not isinstance(payload,dict): raise ValueError('请求格式无效。')
+        with connect() as c: updated=network_daily.save(c,day,payload.get('content'))
+        return jsonify({'ok':True,'updated_at':updated})
+    except ValueError as exc: return jsonify({'error':str(exc)}),400
+
+@app.post('/api/network/day/<day>/email')
+def network_email(day):
+    try:
+        network_daily.validate_date(day)
+        payload=request.get_json(silent=True)
+        if not isinstance(payload,dict): raise ValueError('邮件请求格式无效。')
+        fields=[payload.get(k,'') for k in ('sender','recipient','auth_code','subject','body')]
+        if not all(isinstance(field,str) for field in fields): raise ValueError('邮件字段格式无效。')
+        if not fields[2]: fields[2]=credential_store.get_for_sender(fields[0]) or ''
+        if not fields[2]: raise ValueError('没有该发件邮箱已保存的授权码，请先填写或保存。')
+        send_report(*fields)
+        return jsonify({'ok':True,'message':'QQ 邮箱服务器已接受邮件，请在发件箱核对。'})
+    except (smtplib.SMTPException,OSError): return jsonify({'error':'邮件发送失败，请检查网络、邮箱地址和授权码后重试。'}),502
+    except (ValueError,TypeError,RuntimeError) as exc: return jsonify({'error':str(exc) or '邮件信息无效。'}),400
 
 @app.get('/api/status')
 def status():
@@ -137,7 +332,7 @@ def city_history():
 
 @app.before_request
 def protect_mail_endpoints():
-    if request.path in ('/api/mail/credential','/api/database/credential') or request.path.startswith('/api/assistant/') or request.path.endswith(('/email','/supplement-statistics')):
+    if request.path in ('/api/mail/credential','/api/database/credential') or request.path.startswith(('/api/assistant/','/api/network/','/api/suspension/')) or request.path.endswith(('/email','/supplement-statistics')):
         allowed={'127.0.0.1:5088','localhost:5088'}
         if app.testing: allowed.update({'localhost','127.0.0.1'})
         origin=request.headers.get('Origin')
@@ -146,8 +341,22 @@ def protect_mail_endpoints():
 
 @app.after_request
 def prevent_credential_response_caching(response):
-    if request.path in ('/api/mail/credential','/api/database/credential') or request.path.startswith('/api/assistant/'): response.headers['Cache-Control']='no-store'
+    if request.path in ('/api/mail/credential','/api/database/credential') or request.path.startswith(('/api/assistant/','/api/network/','/api/suspension/')): response.headers['Cache-Control']='no-store'
     return response
+
+@app.post('/api/network/history/import')
+def import_network_history():
+    try:
+        files=request.files.getlist('reports')
+        if len(files)>100: raise ValueError('一次最多导入 100 份日报。')
+        reports=[f.read() for f in files]
+        csv_file=request.files.get('csv')
+        csv_data=csv_file.read() if csv_file else None
+        with connect() as c:
+            result=import_history(c,reports,csv_data)
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({'error':str(exc)}),400
 
 @app.route('/api/mail/credential',methods=['GET','POST','DELETE'])
 def mail_credential():
@@ -227,6 +436,68 @@ def assistant_query_chat():
         if not key: raise ValueError('请先在机器人设置中保存 DeepSeek API 密钥。')
         model=validate_model(data.get('model',DEFAULT_MODEL))
         messages=data.get('messages')
+        if not isinstance(messages,list) or not 1<=len(messages)<=12 or any(not isinstance(m,dict) or m.get('role') not in ('user','assistant') or not isinstance(m.get('content'),str) or not 1<=len(m['content'].strip())<=5000 for m in messages) or messages[-1].get('role')!='user' or sum(len(m['content']) for m in messages)>24000:
+            raise ValueError('对话内容无效或过长，请重新输入。')
+        if analysis_planner.should_plan(messages):
+            plan=analysis_planner.create_plan(key,messages,model)
+            if not plan:
+                return jsonify({'reply':'暂时无法可靠确定比较条件，请说明黑点解决率、地市和两个统计月份。','local_query':True})
+            try:result=analysis_planner.execute(plan,connect,source_reader=wren_daily_bridge.read_snapshot if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None)
+            except ValueError as exc:result={'reply':str(exc),'available':False}
+            result.pop('available',None)
+            return jsonify({**result,'local_query':True})
+        if ranking_planner.should_plan(messages):
+            plan=ranking_planner.create_plan(key,messages,model)
+            if not plan:return jsonify({'reply':'请说明排名方向、数量和统计月份，例如“2026年10月黑点解决率倒数前三”。','local_query':True})
+            try:result=ranking_planner.execute(plan,connect,source_reader=wren_daily_bridge.read_snapshot if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None)
+            except ValueError as exc:result={'reply':str(exc),'available':False}
+            result.pop('available',None)
+            return jsonify({**result,'local_query':True})
+        ranking=highest_resolution_plan(messages[-1]['content'])
+        if ranking:
+            if 'error' in ranking:return jsonify({'reply':ranking['error'],'local_query':True})
+            result=highest_resolution(connect,ranking['month'],source_reader=wren_daily_bridge.read_snapshot if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None)
+            result.pop('available',None)
+            return jsonify({**result,'local_query':True})
+        comparison=network_query.comparison_plan(messages[-1]['content'])
+        if comparison:
+            if 'error' in comparison:return jsonify({'reply':comparison['error'],'local_query':True})
+            result=network_query.compare(connect,comparison,source_reader=wren_daily_bridge.read_rows if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None)
+            result.pop('available',None)
+            return jsonify({**result,'local_query':True})
+        overview_plan=network_query.overview_plan(messages)
+        if overview_plan:
+            if 'error' in overview_plan: return jsonify({'reply':overview_plan['error'],'local_query':True})
+            result=network_query.overview(connect,overview_plan['day'],source_reader=wren_daily_bridge.read_rows if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None)
+            if result.pop('available',False):
+                try:
+                    result['reply']=summarize_query(key,messages[-1]['content'],result,model=model)
+                    date_match=re.search(r'\b\d{4}-\d{2}-\d{2}\b',result.get('evidence',''))
+                    if date_match:result['reply']+=f'\n统计日期：{date_match.group(0)}。'
+                    result['summary_kind']='ai'
+                except ValueError:
+                    result['summary_notice']='AI 总结暂不可用，已显示本地汇总结果。'
+                result['reply']+='\n'+result.pop('coverage')
+            return jsonify({**result,'local_query':True})
+        network_plan=network_query.local_plan(messages[-1]['content']) or query_context.resolve_network_followup(messages)
+        if network_plan:
+            if 'error' in network_plan: return jsonify({'reply':network_plan['error'],'local_query':True})
+            if not query_context.validate_network_plan(network_plan): return jsonify({'reply':'查询条件不完整，请确认日期、地市和指标。','local_query':True})
+            try: result=network_query.query(connect,network_plan['arguments'],source_reader=wren_daily_bridge.read_rows if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None)
+            except ValueError as exc: result={'reply':str(exc),'available':False}
+            if result.pop('available',False):
+                original=result['reply']
+                try:
+                    summary=summarize_query(key,messages[-1]['content'],result,model=model)
+                    date_match=re.search(r'\b\d{4}-\d{2}-\d{2}\b',original)
+                    result['reply']=summary+(f'\n统计日期：{date_match.group(0)}。' if date_match else '')
+                    result['evidence']=original
+                    result['summary_kind']='ai'
+                except ValueError: result['summary_notice']='AI 总结暂不可用，已显示本地统计结果。'
+            return jsonify({**result,'local_query':True})
+        network_question=messages[-1]['content']
+        if re.search(r'日报|网络运行|RedCap|3CC|5G[-－]?A|4G|5G|VoNR|VoLTE|EPSFB',network_question,re.I) and re.search(r'多少|几个|几处|数量|数值|统计|数据|指标|情况如何|怎么样|用户数|话务量|成功率|接通率|掉线率|分流比|占比',network_question) and not re.search(r'黑点|挂起|确认纳入|质检|怎么算|怎么计算|口径|什么意思|区别|定义|是什么|原理',network_question):
+            return jsonify({'reply':'该日报指标暂未接入，或指标名称不明确。请说明单日日期、全省或地市及具体指标，例如“2026年10月21日合肥5G数据流量”。','local_query':True})
         explicit_metric=None
         if isinstance(messages,list) and messages and isinstance(messages[-1],dict):
             question=messages[-1].get('content')
@@ -237,10 +508,13 @@ def assistant_query_chat():
                 return jsonify({'reply':'这句话包含多个统计指标，请先指定其中一个查询，以便准确核对口径。','local_query':True})
             if isinstance(question,str) and (explicit_metric or re.search(r'黑点|解决率|质检合格|确认纳入|挂起',question)) and re.search(r'对比|比较|相比|环比|同比|上月|上个月|排名|第几|最多|最少|最高|最低|原因|类别',question) and not re.search(r'怎么算|怎么计算|口径|什么意思|区别|定义',question):
                 return jsonify({'reply':'目前仅支持单月的地市指标和挂起库数量查询；跨月对比、排名、原因或类别查询暂未实现。','local_query':True})
-            if isinstance(question,str) and re.search(r'申请挂起|全球通|投资|成本|投诉压降|投诉压降率|实时未解决|4G投诉|5G投诉|已归档',question) and not re.search(r'怎么算|怎么计算|口径|什么意思|区别|定义',question):
+            if isinstance(question,str) and re.search(r'全球通|投资|成本|投诉压降|投诉压降率|实时未解决|4G投诉|5G投诉|已归档',question) and not re.search(r'怎么算|怎么计算|口径|什么意思|区别|定义',question):
                 return jsonify({'reply':'该指标的查询工具暂未接入，我不会用其他指标替代。','local_query':True})
         local_fallback=False;fallback_reason=''
-        try: plan=plan_query(key,data.get('messages'),model=model)
+        try:
+            if re.search(r'申请挂起|黑点解决情况|挂起库情况',messages[-1]['content']):
+                plan=local_query_plan(messages) or {'reply':'请说明要查询的月份和范围，例如“2026年10月全省黑点解决情况”。'}
+            else: plan=plan_query(key,data.get('messages'),model=model)
         except ValueError as exc:
             reason=str(exc)
             if not any(marker in reason for marker in ('无法连接 DeepSeek','DeepSeek 响应超时','DeepSeek 服务暂时无法处理请求','请求过于频繁','DeepSeek 返回服务错误')): raise
@@ -262,8 +536,10 @@ def assistant_query_chat():
                 if len(months)==1 and isinstance(args.get('month'),str) and re.fullmatch(r'\d{4}-\d{2}',args['month']):
                     args['month']=f'{args["month"][:4]}-{int(months[0]):02d}'
             plan={'tool':'query_city_metrics','arguments':{'month':args.get('month'),'city':args.get('city'),'metric':explicit_metric}}
+        if plan.get('tool')=='query_network_daily':
+            return jsonify({'reply':'暂时无法确定日报查询指标或范围。请说明单日日期、地市和具体指标，例如“2026年10月21日合肥5G数据流量”。','local_query':True})
         if 'tool' in plan:
-            try: result=query_statistics(connect,plan['tool'],plan['arguments'],structured=True)
+            try: result=query_statistics(connect,plan['tool'],plan['arguments'],structured=True,source_reader=wren_daily_bridge.read_snapshot if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None)
             except ValueError as exc: result={'reply':str(exc)}
             if local_fallback:
                 result['summary_notice']=fallback_reason+' 本次已使用本地规则查询和生成回答。'

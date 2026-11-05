@@ -112,6 +112,119 @@ class SmartQueryTests(unittest.TestCase):
         self.assertIn('缺少最后一个周五',response.json['reply'])
         summarize.assert_not_called()
 
+    @patch('app.summarize_query',side_effect=ValueError('offline'))
+    @patch('app.plan_query')
+    @patch('credential_store.get_assistant_key',return_value='fake')
+    def test_application_suspended_alias_and_conflict(self,key,planner,summary):
+        self.insert()
+        r=self.client.post('/api/assistant/query-chat',json={'messages':[{'role':'user','content':'2026年10月合肥申请挂起数量'}]})
+        self.assertEqual(r.status_code,200);self.assertIn('7处',r.json['reply']);planner.assert_not_called()
+
+    def test_suspended_source_conflicts_are_not_summarized_as_equal(self):
+        self.month['total']['suspended']=8
+        self.insert()
+        result=query(service.connect,'query_suspended',{'month':'2026-10','city':'全省'},structured=True)
+        self.assertFalse(result['available']);self.assertIn('不一致',result['reply'])
+
+    @patch('app.summarize_query',side_effect=ValueError('offline'))
+    @patch('app.plan_query',return_value={'tool':'query_suspended','arguments':{'month':'2026-10','city':'合肥'}})
+    @patch('credential_store.get_assistant_key',return_value='fake')
+    def test_wren_snapshot_preserves_monthly_selection(self,key,plan,summary):
+        row=[json.dumps(self.week),json.dumps(self.month),'yes','yes']
+        with patch.dict('os.environ',{'ZHIHUI_DATABASE':'postgres'}),patch('app.wren_daily_bridge.read_snapshot',return_value=row) as reader:
+            r=self.client.post('/api/assistant/query-chat',json={'messages':[{'role':'user','content':'2026年10月合肥挂起库多少'}]})
+        self.assertIn('7处',r.json['reply']);reader.assert_called_once_with('2026-10-30')
+
+    def test_wren_snapshot_missing_report_not_zero(self):
+        result=query(service.connect,'query_suspended',{'month':'2026-10','city':'全省'},structured=True,source_reader=lambda day:None)
+        self.assertFalse(result['available']);self.assertIn('缺少最后一个周五',result['reply'])
+
+    @patch('app.summarize_query',side_effect=ValueError('offline'))
+    @patch('app.plan_query')
+    @patch('credential_store.get_assistant_key',return_value='fake')
+    def test_user_examples_city_progress_and_suspended(self,key,planner,summary):
+        self.month['cities']=[{'city':name,'included':10,'qualified':5} for name in CITIES]
+        self.insert()
+        result=self.client.post('/api/assistant/query-chat',json={'messages':[{'role':'user','content':'10月份各地市黑点解决情况'}]})
+        self.assertEqual(result.status_code,200);self.assertEqual(len(result.json['table']['rows']),16)
+        result=self.client.post('/api/assistant/query-chat',json={'messages':[{'role':'user','content':'10月份合肥挂起库情况'}]})
+        self.assertEqual(result.status_code,200);self.assertIn('7处',result.json['reply']);planner.assert_not_called()
+
+    @patch('credential_store.get_assistant_key',return_value='fake')
+    def test_highest_blackspot_resolution_including_ties_and_zero(self,key):
+        self.month['cities']=[{'city':name,'included':10,'qualified':4} for name in CITIES]
+        self.month['cities'][0].update(included=10,qualified=9)
+        self.month['cities'][1].update(included=20,qualified=18)
+        self.month['cities'][2].update(included=0,qualified=0)
+        self.insert()
+        response=self.client.post('/api/assistant/query-chat',json={'messages':[{'role':'user','content':'2026年10月哪个地市黑点解决率最高'}]})
+        self.assertEqual(response.status_code,200);self.assertIn('并列90.00%',response.json['reply'])
+        self.assertIn(CITIES[0],response.json['reply']);self.assertIn(CITIES[1],response.json['reply'])
+        self.assertIn(CITIES[2],response.json['evidence']);self.assertEqual(len(response.json['table']['rows']),16)
+
+    @patch('credential_store.get_assistant_key',return_value='fake')
+    def test_highest_needs_complete_data_and_actual_denominators(self,key):
+        self.insert()
+        response=self.client.post('/api/assistant/query-chat',json={'messages':[{'role':'user','content':'2026年10月哪个地市黑点解决率最高'}]})
+        self.assertEqual(response.status_code,400);self.assertIn('缺少部分地市',response.json['error'])
+
+    def test_highest_uses_exact_ratio_not_rounded_display(self):
+        from smart_query import highest_resolution
+        self.month['cities']=[{'city':name,'included':100000,'qualified':50000} for name in CITIES]
+        self.month['cities'][0]['qualified']=90000
+        self.month['cities'][1]['qualified']=90001
+        self.insert()
+        result=highest_resolution(service.connect,'2026-10')
+        self.assertIn(CITIES[1]+'市',result['reply']);self.assertNotIn(CITIES[0]+'市',result['reply'])
+
+    @patch('credential_store.get_assistant_key',return_value='fake')
+    def test_structured_multistep_highest_then_compare(self,key):
+        self.month['cities']=[{'city':name,'included':10,'qualified':5} for name in CITIES]
+        self.month['cities'][0]['qualified']=9
+        self.month['cities'][1]['qualified']=9
+        self.insert()
+        previous={'snapshot_version':2,'total':{'included':160,'qualified':80},'cities':[{'city':name,'included':10,'qualified':8} for name in CITIES],'suspended':{'count':0,'cities':[]}}
+        self.insert('2026-09-25',weekly=True,monthly=False,week=previous)
+        plan={'operation':'highest_compare','month':'2026-10','other_month':'2026-09','city':'全部地市','clarification':''}
+        with patch('analysis_planner.create_plan',return_value=plan):
+            r=self.client.post('/api/assistant/query-chat',json={'messages':[{'role':'user','content':'2026年10月哪个地市黑点解决率最高，和9月相比如何'}]})
+        self.assertEqual(r.status_code,200);self.assertEqual(len(r.json['table']['rows']),2)
+        self.assertEqual(r.json['table']['rows'][0][-1],'+10.00个百分点')
+        self.assertIn('并列最高',r.json['reply'])
+
+    @patch('credential_store.get_assistant_key',return_value='fake')
+    def test_structured_missing_month_does_not_invent(self,key):
+        self.month['cities']=[{'city':name,'included':10,'qualified':5} for name in CITIES]
+        self.insert()
+        plan={'operation':'highest_compare','month':'2026-10','other_month':'2026-09','city':'全部地市','clarification':''}
+        with patch('analysis_planner.create_plan',return_value=plan):
+            r=self.client.post('/api/assistant/query-chat',json={'messages':[{'role':'user','content':'2026年10月哪个地市黑点解决率最高，和9月相比如何'}]})
+        self.assertIn('对照数据不可用',r.json['reply']);self.assertNotIn('table',r.json)
+
+    @patch('ranking_planner.requests.post',side_effect=__import__('requests').ConnectionError())
+    @patch('credential_store.get_assistant_key',return_value='fake')
+    def test_lowest_three_and_followup(self,key,post):
+        self.month['cities']=[{'city':name,'included':10,'qualified':i+1 if i<9 else 9} for i,name in enumerate(CITIES)]
+        self.insert()
+        for messages in ([{'role':'user','content':'现在10月地市黑点解决率倒数前三'}],[{'role':'user','content':'现在10月地市黑点解决率倒数前三'},{'role':'assistant','content':'旧回答'}, {'role':'user','content':'10月倒数前三地市'}]):
+            response=self.client.post('/api/assistant/query-chat',json={'messages':messages})
+            self.assertEqual(response.status_code,200)
+            self.assertEqual(len(response.json['table']['rows']),3)
+
+    def test_rank_ties_at_cutoff_and_zero_are_handled(self):
+        from ranking_planner import execute
+        self.month['cities']=[{'city':name,'included':10,'qualified':9} for name in CITIES]
+        self.month['cities'][0].update(included=10,qualified=1)
+        self.month['cities'][1].update(included=10,qualified=2)
+        self.month['cities'][2].update(included=10,qualified=3)
+        self.month['cities'][3].update(included=20,qualified=6)
+        self.month['cities'][4].update(included=0,qualified=0)
+        self.insert()
+        result=execute({'month':'2026-10','direction':'asc','limit':3},service.connect)
+        self.assertEqual(len(result['table']['rows']),4)
+        self.assertEqual([x[0] for x in result['table']['rows']],['1','2','3','3'])
+        self.assertIn('末位并列',result['reply']);self.assertIn(CITIES[4],result['evidence'])
+
     def test_zero_denominator_has_no_fabricated_rate(self):
         self.week['cities'][0].update(included=0,qualified=0)
         self.insert(weekly=True,monthly=False)
@@ -198,7 +311,7 @@ class SmartQueryTests(unittest.TestCase):
         post.return_value=Mock(status_code=200,json=lambda:{'choices':[{'message':{'tool_calls':[{'function':{'name':'query_suspended','arguments':'{"month":"2026-10","city":"合肥"}'}}]}}]})
         result=assistant_service.plan_query('fake-secret',[{'role':'user','content':'10月合肥挂起多少'}])
         self.assertEqual(result['tool'],'query_suspended')
-        payload=post.call_args.kwargs['json'];self.assertEqual(len(payload['tools']),2)
+        payload=post.call_args.kwargs['json'];self.assertEqual({t['function']['name'] for t in payload['tools']},{'query_city_metrics','query_suspended','query_network_daily'})
         self.assertNotIn('snapshot_version',str(payload));self.assertFalse(post.call_args.kwargs['allow_redirects'])
 
     @patch('assistant_service.requests.post')

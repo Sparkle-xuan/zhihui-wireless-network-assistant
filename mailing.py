@@ -6,7 +6,7 @@ from email.message import EmailMessage
 
 ADDRESS=re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}$")
 
-def send_report(sender,recipient,auth_code,subject,body,attachment=None):
+def send_report(sender,recipient,auth_code,subject,body,attachment=None,html_body=None):
     sender=sender.strip(); recipient=recipient.strip()
     if len(sender)>254 or not ADDRESS.fullmatch(sender): raise ValueError('请输入有效的发件邮箱地址。')
     if len(recipient)>254 or not ADDRESS.fullmatch(recipient): raise ValueError('请输入一个有效的收件邮箱地址。')
@@ -16,6 +16,9 @@ def send_report(sender,recipient,auth_code,subject,body,attachment=None):
     message=EmailMessage()
     message['From']=sender; message['To']=recipient; message['Subject']=subject.strip()
     message.set_content(body)
+    if html_body is not None:
+        if not isinstance(html_body,str) or len(html_body)>1500000: raise ValueError('邮件表格内容无效或过长。')
+        message.add_alternative(html_body,subtype='html')
     if attachment:
         data,filename=attachment
         message.add_attachment(data,maintype='application',subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet',filename=filename)

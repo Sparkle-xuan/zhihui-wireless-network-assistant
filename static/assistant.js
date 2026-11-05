@@ -22,16 +22,22 @@
   const examples=document.createElement('div');examples.className='assistant-examples';examples.setAttribute('aria-label','提问示例');
   const previousMonth=new Date();previousMonth.setDate(1);previousMonth.setMonth(previousMonth.getMonth()-1);
   const exampleMonth=previousMonth.getFullYear()+'年'+(previousMonth.getMonth()+1)+'月';
-  for(const text of [exampleMonth+'各地市解决率',exampleMonth+'全省挂起库数量']){const button=document.createElement('button');button.type='button';button.textContent=text;button.addEventListener('click',()=>{input.value=text;input.focus();});examples.append(button);}
+  for(const text of [exampleMonth+'各地市解决率',exampleMonth+'全省挂起库数量','最新全省5G数据流量']){const button=document.createElement('button');button.type='button';button.textContent=text;button.addEventListener('click',()=>{input.value=text;input.focus();});examples.append(button);}
   panel.querySelector('.assistant-intro').append(examples);
   const composerHint=document.createElement('span');composerHint.className='assistant-composer-hint';composerHint.textContent='Enter 发送 · Shift + Enter 换行';el('form').querySelector('.assistant-composer-actions').prepend(composerHint);
   function setSettingsVisible(visible){settings.hidden=!visible;settings.open=visible;settingsButton.setAttribute('aria-expanded',String(visible));}
   settingsButton.addEventListener('click',()=>{setSettingsVisible(settings.hidden);if(!settings.hidden)el('key').focus();});
-  let history=[], configured=false, pending=null, generation=0, drag=null, suppressClick=false;
+  let history=[], configured=false, pending=null, generation=0, drag=null, suppressClick=false, panelPosition=null, panelDrag=null;
   const viewport=()=>({width:window.innerWidth,height:window.innerHeight});
   const placeShortcuts=()=>{const r=launcher.getBoundingClientRect();pet.classList.toggle('shortcuts-below',r.top<64);const width=shortcuts.offsetWidth||112;shortcuts.style.left=Math.max(8-r.left,Math.min((r.width-width)/2,innerWidth-r.left-width-8))+'px';};
   const move=(x,y)=>{const p=AssistantUtils.launcherPosition(x,y,viewport(),{width:launcher.offsetWidth,height:launcher.offsetHeight}); Object.assign(pet.style,{left:p.x+'px',top:p.y+'px',right:'auto',bottom:'auto'});placeShortcuts();if(!panel.hidden)positionPanel();};
-  function positionPanel(){const p=AssistantUtils.panelPosition(launcher.getBoundingClientRect(),{width:panel.offsetWidth,height:panel.offsetHeight},viewport());panel.style.left=p.x+'px';panel.style.top=p.y+'px';}
+  function positionPanel(){const size={width:panel.offsetWidth,height:panel.offsetHeight};const p=panelPosition?AssistantUtils.launcherPosition(panelPosition.x,panelPosition.y,viewport(),size):AssistantUtils.panelPosition(launcher.getBoundingClientRect(),size,viewport());panel.style.left=p.x+'px';panel.style.top=p.y+'px';if(panelPosition)panelPosition=p;}
+  const header=panel.querySelector('.assistant-header');header.tabIndex=0;header.setAttribute('aria-label','聊天窗口标题栏，可拖动窗口或使用方向键移动');header.title='拖动此处移动聊天窗口';
+  header.addEventListener('pointerdown',e=>{if(e.button!==0||e.target.closest('button'))return;const r=panel.getBoundingClientRect();panelDrag={id:e.pointerId,x:e.clientX,y:e.clientY,left:r.left,top:r.top};header.setPointerCapture(e.pointerId);});
+  header.addEventListener('pointermove',e=>{if(!panelDrag||panelDrag.id!==e.pointerId)return;panelPosition={x:panelDrag.left+e.clientX-panelDrag.x,y:panelDrag.top+e.clientY-panelDrag.y};positionPanel();});
+  function finishPanelDrag(e){if(panelDrag&&panelDrag.id===e.pointerId)panelDrag=null;}
+  header.addEventListener('pointerup',finishPanelDrag);header.addEventListener('pointercancel',finishPanelDrag);
+  header.addEventListener('keydown',e=>{if(e.target!==header)return;const step=e.shiftKey?30:10,offsets={ArrowLeft:[-step,0],ArrowRight:[step,0],ArrowUp:[0,-step],ArrowDown:[0,step]};if(!offsets[e.key])return;e.preventDefault();const r=panel.getBoundingClientRect(),d=offsets[e.key];panelPosition={x:r.left+d[0],y:r.top+d[1]};positionPanel();});
   function rememberPosition(){try{const r=launcher.getBoundingClientRect();localStorage.setItem('zhihui-assistant-position',JSON.stringify({x:r.left/window.innerWidth,y:r.top/window.innerHeight}));}catch(_){}}
   try{const p=JSON.parse(localStorage.getItem('zhihui-assistant-position'));if(p&&Number.isFinite(p.x)&&Number.isFinite(p.y))move(p.x*innerWidth,p.y*innerHeight);}catch(_){}
   launcher.addEventListener('pointerdown',e=>{if(e.button!==0)return;const r=launcher.getBoundingClientRect();drag={id:e.pointerId,x:e.clientX,y:e.clientY,left:r.left,top:r.top,moved:false};launcher.setPointerCapture(e.pointerId);});
