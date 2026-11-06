@@ -76,3 +76,38 @@ def compare(current,previous,month):
         else:result['note']='上月地市分布不完整，无法比较各地市变化。'
     else:result['note']='上月或本月未保存完整地市分布，无法比较各地市变化。'
     return result
+
+
+def workbook_summary(source):
+    """Extract only suspension aggregates; do not retain work orders or the workbook."""
+    from collections import Counter
+    from openpyxl import load_workbook
+    try:book=load_workbook(source,read_only=True,data_only=True)
+    except Exception as exc:raise ValueError('无法读取 Excel 文件。') from exc
+    try:
+        if '挂起' not in book:raise ValueError('文件缺少挂起工作表。')
+        rows=book['挂起'].iter_rows(values_only=True);headers=next(rows,())
+        def index(name):
+            hits=[i for i,value in enumerate(headers) if value==name]
+            if len(hits)!=1:raise ValueError('挂起表缺少或重复字段：'+name)
+            return hits[0]
+        city_index=index('地市');id_index=index('工单Id')
+        matches=[i for i,value in enumerate(headers) if value=='waitingClassifyName']
+        if len(matches)>1 and 105 in matches:matches=[105]
+        if len(matches)>1:raise ValueError('挂起分类字段重复，请核对表格。')
+        category_index=matches[0] if matches else None
+        cities=Counter();categories=Counter();count=0
+        for row in rows:
+            if len(row)<=id_index or row[id_index] is None or not str(row[id_index]).strip():continue
+            count+=1
+            city=str(row[city_index]).strip() if len(row)>city_index and row[city_index] is not None else ''
+            if city and city not in CITIES:raise ValueError('挂起表存在无法识别的地市，请核对。')
+            if city:cities[city]+=1
+            if category_index is not None and len(row)>category_index and row[category_index] is not None:
+                category=str(row[category_index]).strip()
+                if category:categories[category]+=1
+        if not count:raise ValueError('挂起表没有可识别的工单记录。')
+        group={'count':count,'cities':list(cities.items())}
+        if category_index is not None:group['categories']=dict(categories)
+        return {'suspended':group}
+    finally:book.close()

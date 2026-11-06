@@ -78,4 +78,20 @@ class SuspensionApiTests(unittest.TestCase):
         for payload in [{'month':'2026-09','total':2,'cities':{'合肥':3},'categories':{}},{'month':'2026-09','total':2,'cities':{'不存在':1},'categories':{}},{'month':'2026-09','total':2,'cities':{},'categories':{'甲':3}}]:
             self.assertEqual(self.client.post('/api/suspension/manual',json=payload).status_code,400)
 
+    def test_workbook_import_preserves_source_date_and_handles_missing_category(self):
+        from openpyxl import Workbook
+        from io import BytesIO
+        def workbook(category=True):
+            w=Workbook();sheet=w.active;sheet.title='挂起';sheet.append(['工单Id','地市']+(['waitingClassifyName'] if category else []));sheet.append(['x','合肥']+(['无项目'] if category else []));out=BytesIO();w.save(out);out.seek(0);return out
+        def upload(day,filename,category=True):
+            return self.client.post('/api/suspension/import',data={'source_date':day,'file':(workbook(category),filename)},content_type='multipart/form-data')
+        self.assertEqual(upload('2026-09-24','2026-0924.xlsx').status_code,200)
+        self.assertEqual(upload('2026-09-24','2026-0924.xlsx').status_code,200)
+        self.assertEqual(upload('2026-08-28','2026-0828.xlsx',False).status_code,200)
+        self.assertEqual(upload('2026-07-31','2026-0730.xlsx').status_code,400)
+        previous=self.client.get('/api/suspension/month/2026-08').get_json();self.assertIsNone(previous['categories']);self.assertTrue(previous['category_note'])
+        current=self.client.get('/api/suspension/month/2026-09').get_json();self.assertEqual(current['kind'],'imported');self.assertEqual(current['period'],'2026-09-24');self.assertEqual(current['comparison']['delta'],0)
+        self.put('2026-09-25',weekly=self.snapshot({'合肥':4}),weekly_text='周报',monthly_text='')
+        self.assertEqual(self.client.get('/api/suspension/month/2026-09').get_json()['period'],'2026-09-24')
+
 if __name__=='__main__':unittest.main()

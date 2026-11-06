@@ -74,6 +74,7 @@ def suspension_last_friday(month):
 
 def ensure_suspension_manual(c):
     c.execute('CREATE TABLE IF NOT EXISTS suspension_manual (month TEXT PRIMARY KEY, snapshot TEXT NOT NULL)')
+    c.execute('CREATE TABLE IF NOT EXISTS suspension_imports (month TEXT PRIMARY KEY, source_date TEXT NOT NULL, snapshot TEXT NOT NULL)')
 
 @app.get('/api/suspension/periods')
 def suspension_periods():
@@ -81,6 +82,7 @@ def suspension_periods():
         ensure_suspension_manual(c)
         rows=c.execute("SELECT period,weekly,monthly FROM reports WHERE weekly <> '' OR monthly <> '' ORDER BY period DESC").fetchall()
         manual=c.execute('SELECT month FROM suspension_manual ORDER BY month DESC').fetchall()
+        imported=c.execute('SELECT month FROM suspension_imports ORDER BY month DESC').fetchall()
     months={}
     for period,weekly,monthly in rows:
         try:
@@ -89,7 +91,7 @@ def suspension_periods():
         except (ValueError,TypeError):continue
         entry=months.setdefault(month,{'month':month,'available':False,'expected_period':expected})
         if period==expected and (weekly or monthly):entry['available']=True
-    for (month,) in manual:
+    for (month,) in manual+imported:
         try:expected=suspension_last_friday(month)
         except (ValueError,TypeError):continue
         entry=months.setdefault(month,{'month':month,'available':False,'expected_period':expected})
@@ -98,6 +100,12 @@ def suspension_periods():
 
 def suspension_month_snapshot(c,month):
     period=suspension_last_friday(month)
+    ensure_suspension_manual(c)
+    imported=c.execute('SELECT source_date,snapshot FROM suspension_imports WHERE month=?',(month,)).fetchone()
+    if imported:
+        result=suspension.summary(imported[1],imported[0],'imported')
+        if result['categories'] is None:result['category_note']='原表未提供挂起归属类别，暂无法统计分类。'
+        return result
     row=c.execute('SELECT data,monthly_data,weekly,monthly FROM reports WHERE period=?',(period,)).fetchone()
     if row:
         data,monthly_data,weekly,monthly=row
@@ -106,6 +114,31 @@ def suspension_month_snapshot(c,month):
     ensure_suspension_manual(c)
     manual=c.execute('SELECT snapshot FROM suspension_manual WHERE month=?',(month,)).fetchone()
     return suspension.summary(manual[0],None,'manual') if manual else None
+
+@app.post('/api/suspension/import')
+def suspension_import():
+    try:
+        source_date=request.form.get('source_date','')
+        parsed=date.fromisoformat(source_date)
+        if parsed.isoformat()!=source_date:raise ValueError('请选择有效的统计日期。')
+        upload=request.files.get('file')
+        if not upload or not upload.filename or not upload.filename.lower().endswith('.xlsx'):raise ValueError('请选择 .xlsx 格式的当年工单表。')
+        dates=set()
+        for m in re.finditer(r'(?<!\d)(20\d{2})[-_.年]?(\d{2})[-_.月]?(\d{2})(?:日)?(?!\d)',upload.filename):
+            try:dates.add(date(*map(int,m.groups())).isoformat())
+            except ValueError:pass
+        if len(dates)!=1 or source_date not in dates:raise ValueError('文件名中的日期与所选统计日期不一致，请核对。')
+        snapshot=json.dumps(suspension.workbook_summary(upload.stream),ensure_ascii=False,sort_keys=True)
+        month=source_date[:7]
+        with connect() as c:
+            ensure_suspension_manual(c)
+            existing=c.execute('SELECT source_date,snapshot FROM suspension_imports WHERE month=?',(month,)).fetchone()
+            if existing:
+                if existing[0]==source_date and json.loads(existing[1])==json.loads(snapshot):return jsonify({'ok':True,'message':'该月汇总已保存。'})
+                return jsonify({'error':'该月已有导入记录，为避免覆盖，请先核对已有数据。'}),409
+            c.execute('INSERT INTO suspension_imports (month,source_date,snapshot) VALUES (?,?,?)',(month,source_date,snapshot))
+        return jsonify({'ok':True,'message':'已保存该月挂起汇总。'})
+    except (ValueError,TypeError) as exc:return jsonify({'error':str(exc) or '文件或日期无效。'}),400
 
 @app.post('/api/suspension/manual')
 def suspension_manual_save():
