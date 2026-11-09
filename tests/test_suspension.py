@@ -71,7 +71,7 @@ class SuspensionApiTests(unittest.TestCase):
         self.assertEqual(previous['kind'],'manual');self.assertIsNone(previous['period']);self.assertEqual(len(previous['cities']),2);self.assertIsNone(previous['warning_cities'])
         current=self.client.get('/api/suspension/month/2026-10').get_json();comp=current['comparison']
         self.assertEqual(comp['delta'],-2);self.assertEqual(comp['previous_kind'],'manual');self.assertEqual({x['name']:x['delta'] for x in comp['cities']},{'安庆':-1,'合肥':2})
-        self.assertIn('仅提供部分地市',comp['note'])
+        self.assertIn('部分地市数据未提供',comp['note'])
         self.put('2026-09-25',weekly=self.snapshot({'合肥':7}),weekly_text='周报',monthly_text='')
         self.assertEqual(self.client.get('/api/suspension/month/2026-09').get_json()['kind'],'weekly')
     def test_manual_validation_rejects_impossible_and_unknown_values(self):
@@ -93,5 +93,34 @@ class SuspensionApiTests(unittest.TestCase):
         current=self.client.get('/api/suspension/month/2026-09').get_json();self.assertEqual(current['kind'],'imported');self.assertEqual(current['period'],'2026-09-24');self.assertEqual(current['comparison']['delta'],0)
         self.put('2026-09-25',weekly=self.snapshot({'合肥':4}),weekly_text='周报',monthly_text='')
         self.assertEqual(self.client.get('/api/suspension/month/2026-09').get_json()['period'],'2026-09-24')
+
+    def test_opt_in_provisional_classification_updates_only_derived_data(self):
+        from io import BytesIO
+        from openpyxl import Workbook
+        def workbook(city='合肥'):
+            w=Workbook();sheet=w.active;sheet.title='挂起';sheet.append(['工单Id','地市','不纳入原因'])
+            for n,reason in enumerate(['暂无项目且协调困难','低价值无项目','低价值','暂无项目','其他']):sheet.append([str(n),city,reason])
+            out=BytesIO();w.save(out);out.seek(0);return out
+        def upload(provisional='',city='合肥'):
+            return self.client.post('/api/suspension/import',data={'source_date':'2026-07-24','provisional':provisional,'file':(workbook(city),'2026-0724.xlsx')},content_type='multipart/form-data')
+        self.assertEqual(upload().status_code,200)
+        self.assertIsNone(self.client.get('/api/suspension/month/2026-07').get_json()['categories'])
+        self.assertEqual(upload('1','安庆').status_code,409)
+        self.assertEqual(upload('1').status_code,200)
+        data=self.client.get('/api/suspension/month/2026-07').get_json();self.assertTrue(data['category_estimated']);self.assertEqual({x['name']:x['value'] for x in data['categories']},{'纠纷协调类工单':1,'低价值':1,'无项目':1,'待核实':2});self.assertIn('关键词初筛',data['category_note'])
+        with service.connect() as c:
+            original=json.loads(c.execute('SELECT snapshot FROM suspension_imports WHERE month=?',('2026-07',)).fetchone()[0]);self.assertNotIn('categories',original['suspended'])
+
+    def test_preferred_bulletin_keeps_workbook_and_partial_city_values(self):
+        from openpyxl import Workbook
+        from io import BytesIO
+        w=Workbook();sheet=w.active;sheet.title='挂起';sheet.append(['工单Id','地市']);sheet.append(['x','合肥']);out=BytesIO();w.save(out);out.seek(0)
+        r=self.client.post('/api/suspension/import',data={'source_date':'2026-07-24','file':(out,'2026-0724.xlsx')},content_type='multipart/form-data');self.assertEqual(r.status_code,200)
+        payload={'month':'2026-07','total':10,'cities':{'合肥':7},'categories':{},'preferred':True}
+        self.assertEqual(self.client.post('/api/suspension/manual',json=payload).status_code,200)
+        self.put('2026-06-26',weekly=self.snapshot({'合肥':5,'安庆':2}),weekly_text='周报',monthly_text='')
+        data=self.client.get('/api/suspension/month/2026-07').get_json();self.assertEqual(data['kind'],'manual');self.assertEqual(data['total'],10);self.assertIsNone(data['categories']);self.assertEqual(data['comparison']['delta'],3);self.assertEqual(data['comparison']['cities'],[{'name':'合肥','delta':2}])
+        old=self.client.get('/api/suspension/month/2026-07?source=imported').get_json();self.assertEqual(old['kind'],'imported');self.assertEqual(old['total'],1)
+        self.assertEqual(self.client.get('/api/suspension/month/2026-07?source=bad').status_code,400)
 
 if __name__=='__main__':unittest.main()

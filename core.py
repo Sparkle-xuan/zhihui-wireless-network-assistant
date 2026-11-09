@@ -3,6 +3,7 @@ from collections import Counter
 from datetime import date
 from io import BytesIO
 import re
+import suspension_reasons
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
@@ -47,6 +48,8 @@ def analyze(current, legacy=None):
             raise ValueError('缺少必要工作表：2026 文件需要「汇聚黑点-汇总」「挂起」，历史文件需要「汇聚黑点-汇总」。')
         rows=list(read_rows(w['汇聚黑点-汇总'],['city','included','status','before','after','five','priority','cost','stage','first','second']))
         suspended=list(read_rows(w['挂起'],['city','category']))
+        reason_summary=suspension_reasons.extract(w['挂起'],CITIES)
+        if reason_summary and reason_summary['total']!=len(suspended):reason_summary=None
         legacy_rows=list(read_rows(old['汇聚黑点-汇总'],['kind','status','coord'])) if old is not None else None
     finally:
         w.close()
@@ -76,7 +79,7 @@ def analyze(current, legacy=None):
     def aggregate(rr):
         b=sum(number(r['before']) for r in rr); a=sum(number(r['after']) for r in rr)
         return {'before':b,'after':a,'reduction':abs(a/b-1) if b else 0}
-    return {'cities':city_rows,'total':total,'qualified_complaints':aggregate(qualified_rows),'archive':{'count':len(archived),**aggregate(archived)},'global':{'count':len(global_rows),'qualified':gb,'rate':percentage(gb,len(global_rows)),'opening':sum(r['status'] in ('地市处理','结果质检') and r['stage'] in ('站点开通','设备安装') for r in global_rows)},'suspended':{'count':len(suspended),'cities':suspended_city.most_common(),'categories':dict(categories)},'legacy':legacy_result}
+    return {'cities':city_rows,'total':total,'qualified_complaints':aggregate(qualified_rows),'archive':{'count':len(archived),**aggregate(archived)},'global':{'count':len(global_rows),'qualified':gb,'rate':percentage(gb,len(global_rows)),'opening':sum(r['status'] in ('地市处理','结果质检') and r['stage'] in ('站点开通','设备安装') for r in global_rows)},'suspended':{'count':len(suspended),'cities':suspended_city.most_common(),'categories':dict(categories),'reason_analysis':reason_summary},'legacy':legacy_result}
 
 def reports(data, period, previous, notes):
     t=data['total']; q=data['qualified_complaints']; a=data['archive']; g=data['global']; h=data['suspended']; l=data['legacy']

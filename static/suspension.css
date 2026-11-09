@@ -16,3 +16,27 @@
 @media(max-width:650px){.suspension .warning-list{grid-template-columns:1fr}.suspension .warning-row{padding:12px 0}.suspension .warning-count{font-size:18px}.compare-heading{align-items:flex-start;flex-direction:column}.compare-select-label{width:100%;justify-content:space-between}.compare-select-label select{min-width:150px}.compare-content{grid-template-columns:1fr;gap:18px}.compare-summary{padding:0 0 14px;border-right:0;border-bottom:1px solid #e9e8f1}.compare-row{grid-template-columns:90px minmax(0,1fr) 64px;gap:7px;font-size:12px}.suspension .city-row{grid-template-columns:43px minmax(0,1fr) 40px}}
 
 .manual-suspension{margin-bottom:18px;padding:14px 18px;border-radius:14px}.manual-suspension summary{cursor:pointer;color:#5b4bb0;font-size:14px;font-weight:600}.manual-suspension p{color:#59647a;font-size:13px;line-height:1.6}.manual-fields{display:grid;grid-template-columns:1fr 1fr;gap:14px}.manual-fields label{display:grid;gap:7px;color:#374056;font-size:13px}.manual-fields input,.manual-fields textarea{width:100%;box-sizing:border-box;padding:10px;border:1px solid #dedcec;border-radius:9px;background:#fff;color:#30364a;font:inherit;resize:vertical}.manual-suspension button{margin-top:14px;padding:9px 14px;border:0;border-radius:9px;background:#7457dc;color:white;font:inherit;cursor:pointer}.manual-suspension button:disabled{opacity:.6;cursor:wait}#manual-status{margin-left:12px;color:#5947a7;font-size:13px}.manual-suspension :is(input,textarea,button,summary):focus-visible{outline:3px solid #a99bee;outline-offset:2px}@media(max-width:650px){.manual-fields{grid-template-columns:1fr}}
+
+.estimate-option{display:flex;align-items:flex-start;gap:8px;margin-top:12px;color:#594e37;font-size:13px;line-height:1.5}.estimate-option input{margin-top:3px;flex:none}
+
+#suspension-source-wrap{color:#59647a;font-size:13px;white-space:nowrap}#suspension-source-wrap[hidden]{display:none}#suspension-source{min-width:170px;margin-left:8px}
+
+/* A quiet analysis workspace beneath the city chart. */
+.suspension-main{display:grid;gap:18px;min-width:0}
+.suspension .diagnosis-card{background:linear-gradient(135deg,rgba(247,244,255,.97),rgba(255,255,255,.9) 65%,rgba(235,250,248,.8));border:1px solid rgba(222,213,252,.9);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+.diagnosis-header{display:flex;align-items:center;gap:15px}
+.diagnosis-avatar{display:grid;place-items:center;flex:none;width:66px;height:66px;border-radius:22px;background:linear-gradient(145deg,#ede5ff,#e4f7fc);box-shadow:0 6px 16px rgba(118,92,198,.12)}
+.diagnosis-avatar img{width:61px;height:61px;object-fit:contain}
+.diagnosis-kicker{color:#7964bc;font-size:12px;font-weight:700;letter-spacing:.04em}
+.diagnosis-header h2{margin:5px 0 4px;color:#282e46;font-size:18px}
+.diagnosis-header p{margin:0;color:#657086;font-size:13px;line-height:1.6}
+.diagnosis-content{margin-top:20px;padding:17px 19px;border:1px solid rgba(230,225,247,.85);border-radius:14px;background:rgba(255,255,255,.7);color:#3c465c;font-size:14px;line-height:1.8}
+.diagnosis-placeholder{margin:0;color:#6d768b}
+.diagnosis-section-title{color:#55458e;font-size:13px}
+.diagnosis-facts{margin:7px 0 0;padding-left:20px}.diagnosis-facts li+li{margin-top:3px}
+.diagnosis-provenance{margin:9px 0 0;color:#727b8c;font-size:12px}
+.diagnosis-advice{margin-top:14px;padding-top:13px;border-top:1px solid #eeebf6}.diagnosis-advice p{margin:6px 0 0;white-space:pre-wrap;overflow-wrap:anywhere}
+.diagnosis-actions{display:flex;align-items:center;gap:14px;margin-top:16px}.diagnosis-actions button{padding:10px 17px;border:0;border-radius:10px;background:linear-gradient(120deg,#9579ec,#7254d4);color:#fff;font:inherit;font-size:13px;font-weight:700;cursor:pointer;box-shadow:0 5px 13px rgba(115,83,206,.2)}.diagnosis-actions button:hover{filter:brightness(1.06)}.diagnosis-actions button:disabled{opacity:.65;cursor:wait}.diagnosis-actions button:focus-visible{outline:3px solid #a99bee;outline-offset:3px}.diagnosis-actions #diagnosis-status{color:#7255ab;font-size:13px;line-height:1.5}.diagnosis-privacy{margin:12px 0 0;color:#737c8d;font-size:12px;line-height:1.6}
+@media(max-width:650px){.diagnosis-header{align-items:flex-start}.diagnosis-avatar{width:52px;height:52px;border-radius:16px}.diagnosis-avatar img{width:49px;height:49px}.diagnosis-actions{align-items:flex-start;flex-direction:column;gap:8px}}
+
+.diagnosis-reason-source{margin-top:14px;padding:12px 14px;border-radius:12px;background:rgba(241,238,253,.7);color:#5b5877;font-size:12px;line-height:1.6}.diagnosis-reason-source p{margin:0}.diagnosis-reason-source form{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:9px}.diagnosis-reason-source form[hidden]{display:none}.diagnosis-reason-source input{max-width:100%;font:inherit;color:#535c72}.diagnosis-reason-source button{padding:7px 10px;border:1px solid #d3c9f3;border-radius:8px;background:#fff;color:#654eb7;font:inherit;cursor:pointer}.diagnosis-reason-source button:disabled{opacity:.6}.diagnosis-reason-source :is(input,button):focus-visible{outline:3px solid #a99bee;outline-offset:2px}

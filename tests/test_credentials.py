@@ -36,4 +36,12 @@ class CredentialTests(unittest.TestCase):
             response=client.delete('/api/mail/credential',json={})
             self.assertEqual(response.status_code,200);delete.assert_called_once()
 
+    def test_all_api_routes_reject_cross_origin_and_untrusted_host(self):
+        client=app.app.test_client()
+        for path,method in [('/api/generate','post'),('/api/history','get'),('/api/report/2026-07-24/save','post')]:
+            response=getattr(client,method)(path,headers={'Origin':'https://untrusted.example'})
+            self.assertEqual(response.status_code,403,path)
+        response=client.get('/api/history',headers={'Host':'untrusted.example'})
+        self.assertEqual(response.status_code,403)
+
 if __name__=='__main__': unittest.main()

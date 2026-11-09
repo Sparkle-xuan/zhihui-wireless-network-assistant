@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import re
 import sqlite3
@@ -12,7 +13,7 @@ sys.path.insert(0,str(Path(__file__).parent / '.deps'))
 from core import analyze, reports, export_monthly, CITIES
 from mailing import send_report
 from assistant_service import complete as complete_chat
-from assistant_service import plan_query, summarize_query, validate_model, DEFAULT_MODEL
+from assistant_service import plan_query, summarize_query, validate_model, diagnose_suspension, DEFAULT_MODEL
 from smart_query import query as query_statistics, identify_explicit_metric, local_query_plan, highest_resolution_plan, highest_resolution
 import credential_store
 from network_daily_store import import_history
@@ -24,8 +25,11 @@ import ranking_planner
 import wren_daily_bridge
 import network_document
 import suspension
+import suspension_reasons
 
 app=Flask(__name__,instance_relative_config=True)
+from complaint_routes import complaints
+app.register_blueprint(complaints)
 app.config['MAX_CONTENT_LENGTH']=30*1024*1024
 Path(app.instance_path).mkdir(parents=True,exist_ok=True)
 DB=Path(app.instance_path)/'zhihui.sqlite3'
@@ -75,6 +79,9 @@ def suspension_last_friday(month):
 def ensure_suspension_manual(c):
     c.execute('CREATE TABLE IF NOT EXISTS suspension_manual (month TEXT PRIMARY KEY, snapshot TEXT NOT NULL)')
     c.execute('CREATE TABLE IF NOT EXISTS suspension_imports (month TEXT PRIMARY KEY, source_date TEXT NOT NULL, snapshot TEXT NOT NULL)')
+    c.execute('CREATE TABLE IF NOT EXISTS suspension_estimates (month TEXT PRIMARY KEY, source_date TEXT NOT NULL, categories TEXT NOT NULL)')
+    c.execute('CREATE TABLE IF NOT EXISTS suspension_preferences (month TEXT PRIMARY KEY, source TEXT NOT NULL)')
+    c.execute('CREATE TABLE IF NOT EXISTS suspension_reason_summaries (fingerprint TEXT PRIMARY KEY, month TEXT NOT NULL, source_date TEXT NOT NULL, summary TEXT NOT NULL)')
 
 @app.get('/api/suspension/periods')
 def suspension_periods():
@@ -98,14 +105,28 @@ def suspension_periods():
         entry['available']=True
     return jsonify(sorted(months.values(),key=lambda x:x['month'],reverse=True))
 
-def suspension_month_snapshot(c,month):
+def suspension_month_snapshot_base(c,month,source=None):
     period=suspension_last_friday(month)
     ensure_suspension_manual(c)
+    if source is None:
+        preference=c.execute('SELECT source FROM suspension_preferences WHERE month=?',(month,)).fetchone()
+        if preference:source=preference[0]
+    if source=='manual':
+        manual=c.execute('SELECT snapshot FROM suspension_manual WHERE month=?',(month,)).fetchone()
+        return suspension.summary(manual[0],None,'manual') if manual else None
     imported=c.execute('SELECT source_date,snapshot FROM suspension_imports WHERE month=?',(month,)).fetchone()
     if imported:
         result=suspension.summary(imported[1],imported[0],'imported')
-        if result['categories'] is None:result['category_note']='原表未提供挂起归属类别，暂无法统计分类。'
+        if result['categories'] is None:
+            estimate=c.execute('SELECT source_date,categories FROM suspension_estimates WHERE month=?',(month,)).fetchone()
+            if estimate and estimate[0]==imported[0]:
+                provisional=json.loads(estimate[1]);snapshot=json.loads(imported[1]);snapshot['suspended']['categories']=provisional
+                result=suspension.summary(json.dumps(snapshot,ensure_ascii=False),imported[0],'imported')
+                result['category_estimated']=True
+                result['category_note']='基于不纳入原因的关键词初筛，并非原表归属类别；提及协调或纠纷优先归协调，无法唯一判断的列为待核实。'
+            else:result['category_note']='原表未提供挂起归属类别，暂无法统计分类。'
         return result
+    if source=='imported':return None
     row=c.execute('SELECT data,monthly_data,weekly,monthly FROM reports WHERE period=?',(period,)).fetchone()
     if row:
         data,monthly_data,weekly,monthly=row
@@ -114,6 +135,57 @@ def suspension_month_snapshot(c,month):
     ensure_suspension_manual(c)
     manual=c.execute('SELECT snapshot FROM suspension_manual WHERE month=?',(month,)).fetchone()
     return suspension.summary(manual[0],None,'manual') if manual else None
+
+
+def suspension_reason_fingerprint(month,current):
+    base={key:value for key,value in current.items() if key!='reason_analysis'}
+    return hashlib.sha256(json.dumps({'version':1,'month':month,'snapshot':base},ensure_ascii=False,sort_keys=True,separators=(',',':')).encode('utf-8')).hexdigest()
+
+
+def suspension_month_snapshot(c,month,source=None):
+    result=suspension_month_snapshot_base(c,month,source)
+    if result:
+        row=c.execute('SELECT summary FROM suspension_reason_summaries WHERE fingerprint=?',(suspension_reason_fingerprint(month,result),)).fetchone()
+        if row:
+            try:
+                reasons=suspension_reasons.validate(json.loads(row[0]),result['total'],CITIES)
+                if reasons is not None:result['reason_analysis']=reasons
+            except (ValueError,TypeError):pass
+    return result
+
+
+@app.post('/api/suspension/reasons/import')
+def suspension_reasons_import():
+    try:
+        month=request.form.get('month');suspension.previous_month(month)
+        source=request.form.get('source') or None
+        if source not in (None,'manual','imported'):raise ValueError('版本选择无效。')
+        upload=request.files.get('file')
+        if not upload or not upload.filename or not upload.filename.lower().endswith('.xlsx'):raise ValueError('请选择当期 .xlsx 工单表。')
+        with connect() as c:current=suspension_month_snapshot_base(c,month,source)
+        if not current or not current.get('period'):raise ValueError('当前版本缺少原表统计日期，不能关联原因；请选择对应工单表版本。')
+        dates=set()
+        for m in re.finditer(r'(?<!\d)(20\d{2})[-_.年]?(\d{2})[-_.月]?(\d{2})(?:日)?(?!\d)',upload.filename):
+            try:dates.add(date(*map(int,m.groups())).isoformat())
+            except ValueError:pass
+        if dates!={current['period']}:raise ValueError('文件名中的日期与当前版本统计日期不一致。')
+        extracted=suspension.workbook_summary(upload.stream)
+        fresh=suspension.summary(json.dumps(extracted,ensure_ascii=False),current['period'],current['kind'])
+        reasons=fresh.get('reason_analysis')
+        if not reasons:raise ValueError('表中缺少可用的不纳入原因列，或有效工单数与统计不一致。')
+        if current['city_note'] or fresh['city_note'] or current['total']!=fresh['total'] or current['cities']!=fresh['cities']:
+            raise ValueError('文件的挂起总数或地市分布与当前版本不一致，请核对原表。')
+        if current.get('categories') is not None and not current.get('category_estimated') and current['categories']!=fresh['categories']:
+            def category_map(items):return {item['name']:item['value'] for item in items or []}
+            if category_map(current['categories'])!=category_map(fresh['categories']):raise ValueError('文件的挂起分类与当前版本不一致，请核对原表。')
+        fingerprint=suspension_reason_fingerprint(month,current)
+        with connect() as c:
+            latest=suspension_month_snapshot_base(c,month,source)
+            if not latest or suspension_reason_fingerprint(month,latest)!=fingerprint:raise ValueError('该月数据已变化，请刷新后重试。')
+            c.execute('INSERT INTO suspension_reason_summaries (fingerprint,month,source_date,summary) VALUES (?,?,?,?) ON CONFLICT(fingerprint) DO UPDATE SET summary=excluded.summary',
+                      (fingerprint,month,current['period'],json.dumps(reasons,ensure_ascii=False)))
+        return jsonify({'ok':True,'message':'已补充原因关键词汇总，请重新诊断。'})
+    except (ValueError,TypeError) as exc:return jsonify({'error':str(exc) or '文件或日期无效。'}),400
 
 @app.post('/api/suspension/import')
 def suspension_import():
@@ -128,15 +200,31 @@ def suspension_import():
             try:dates.add(date(*map(int,m.groups())).isoformat())
             except ValueError:pass
         if len(dates)!=1 or source_date not in dates:raise ValueError('文件名中的日期与所选统计日期不一致，请核对。')
-        snapshot=json.dumps(suspension.workbook_summary(upload.stream),ensure_ascii=False,sort_keys=True)
+        provisional=request.form.get('provisional','')=='1'
+        extracted=suspension.workbook_summary(upload.stream,provisional=provisional)
+        estimated=extracted.pop('estimated_categories',None)
+        if provisional and estimated is None:raise ValueError('该表已有原始归属分类，不需要关键词初筛。')
+        snapshot=json.dumps(extracted,ensure_ascii=False,sort_keys=True)
         month=source_date[:7]
         with connect() as c:
             ensure_suspension_manual(c)
             existing=c.execute('SELECT source_date,snapshot FROM suspension_imports WHERE month=?',(month,)).fetchone()
             if existing:
-                if existing[0]==source_date and json.loads(existing[1])==json.loads(snapshot):return jsonify({'ok':True,'message':'该月汇总已保存。'})
-                return jsonify({'error':'该月已有导入记录，为避免覆盖，请先核对已有数据。'}),409
-            c.execute('INSERT INTO suspension_imports (month,source_date,snapshot) VALUES (?,?,?)',(month,source_date,snapshot))
+                saved=json.loads(existing[1]);fresh=json.loads(snapshot)
+                saved.get('suspended',{}).pop('reason_analysis',None);fresh.get('suspended',{}).pop('reason_analysis',None)
+                if existing[0]!=source_date or saved!=fresh:return jsonify({'error':'该月已有不同的导入记录，为避免覆盖，请先核对已有数据。'}),409
+            else:c.execute('INSERT INTO suspension_imports (month,source_date,snapshot) VALUES (?,?,?)',(month,source_date,snapshot))
+            if estimated is not None:
+                encoded=json.dumps(estimated,ensure_ascii=False,sort_keys=True)
+                previous=c.execute('SELECT source_date,categories FROM suspension_estimates WHERE month=?',(month,)).fetchone()
+                if previous and (previous[0]!=source_date or json.loads(previous[1])!=estimated):return jsonify({'error':'该月已有不同的初筛结果，请先核对。'}),409
+                if not previous:c.execute('INSERT INTO suspension_estimates (month,source_date,categories) VALUES (?,?,?)',(month,source_date,encoded))
+            reasons=extracted['suspended'].get('reason_analysis')
+            if existing and reasons:
+                current=suspension_month_snapshot_base(c,month,'imported')
+                fingerprint=suspension_reason_fingerprint(month,current)
+                c.execute('INSERT INTO suspension_reason_summaries (fingerprint,month,source_date,summary) VALUES (?,?,?,?) ON CONFLICT(fingerprint) DO UPDATE SET summary=excluded.summary',
+                          (fingerprint,month,source_date,json.dumps(reasons,ensure_ascii=False)))
         return jsonify({'ok':True,'message':'已保存该月挂起汇总。'})
     except (ValueError,TypeError) as exc:return jsonify({'error':str(exc) or '文件或日期无效。'}),400
 
@@ -151,30 +239,103 @@ def suspension_manual_save():
         if any(name not in CITIES or not suspension._count(value) for name,value in cities.items()):raise ValueError('地市名称或数量无效。')
         if any(not isinstance(name,str) or not name.strip() or len(name)>100 or not suspension._count(value) for name,value in categories.items()):raise ValueError('分类名称或数量无效。')
         if sum(cities.values())>total or sum(categories.values())>total:raise ValueError('地市或分类数量之和不能超过总数。')
-        group={'count':total,'cities':list(cities.items()),'categories':categories,'partial_cities':len(cities)!=len(CITIES) or sum(cities.values())!=total}
+        preferred=payload.get('preferred',False)
+        if type(preferred) is not bool:raise ValueError('版本选择无效。')
+        group={'count':total,'cities':list(cities.items()),'partial_cities':len(cities)!=len(CITIES) or sum(cities.values())!=total}
+        if categories:group['categories']=categories
         encoded=json.dumps({'suspended':group},ensure_ascii=False)
         with connect() as c:
             ensure_suspension_manual(c)
             if c.execute('SELECT month FROM suspension_manual WHERE month=?',(month,)).fetchone():return jsonify({'error':'该月份已有补录汇总，为避免覆盖请先核对。'}),409
             c.execute('INSERT INTO suspension_manual (month,snapshot) VALUES (?,?)',(month,encoded))
+            if preferred:c.execute('INSERT INTO suspension_preferences (month,source) VALUES (?,?) ON CONFLICT(month) DO UPDATE SET source=excluded.source',(month,'manual'))
         return jsonify({'ok':True})
     except (ValueError,TypeError) as exc:return jsonify({'error':str(exc) or '数据格式无效。'}),400
+
+def selected_suspension(month):
+    with connect() as c:return suspension_month_snapshot(c,month)
+
+
+def suspension_diagnosis_fingerprint(month,current,previous):
+    identity={'version':2 if current.get('reason_analysis') else 1,'month':month,'current':current,'previous':previous}
+    encoded=json.dumps(identity,ensure_ascii=False,sort_keys=True,separators=(',',':'))
+    return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
+
+
+def suspension_diagnosis_table(c):
+    c.execute('CREATE TABLE IF NOT EXISTS suspension_diagnoses (fingerprint TEXT PRIMARY KEY, month TEXT NOT NULL, source TEXT NOT NULL, model TEXT NOT NULL, evidence TEXT NOT NULL, reply TEXT NOT NULL, created_at TEXT NOT NULL)')
+
+
+def suspension_diagnosis_load(c,fingerprint):
+    suspension_diagnosis_table(c)
+    row=c.execute('SELECT evidence,reply,model,created_at FROM suspension_diagnoses WHERE fingerprint=?',(fingerprint,)).fetchone()
+    if not row:return None
+    try:evidence=json.loads(row[0])
+    except (ValueError,TypeError):return None
+    if not isinstance(evidence,dict) or not isinstance(row[1],str) or not row[1].strip():return None
+    return {'evidence':evidence,'reply':row[1],'model':row[2],'created_at':row[3],'cached':True}
+
 
 @app.get('/api/suspension/month/<month>')
 def suspension_month_data(month):
     try:
         previous=suspension.previous_month(month)
+        source=request.args.get('source') or None
+        if source not in (None,'manual','imported'):return jsonify({'error':'版本选择无效。'}),400
         with connect() as c:
-            current=suspension_month_snapshot(c,month)
+            current=suspension_month_snapshot(c,month,source)
+            available_sources=[]
+            if c.execute('SELECT month FROM suspension_manual WHERE month=?',(month,)).fetchone():available_sources.append({'value':'manual','label':'人工提供的汇总'})
+            if c.execute('SELECT month FROM suspension_imports WHERE month=?',(month,)).fetchone():available_sources.append({'value':'imported','label':'工单表统计'})
             if not current:return jsonify({'error':f"该月缺少最后一个周五（{suspension_last_friday(month)}）的周报或同日月报数据，请先生成并保存。"}),404
             try:before=suspension_month_snapshot(c,previous);previous_error=''
             except ValueError:before=None;previous_error='上月月末统计数据缺失或异常，无法比较。'
+            saved_diagnosis=suspension_diagnosis_load(c,suspension_diagnosis_fingerprint(month,current,before))
         current['month']=month
+        current['sources']=available_sources
         current['warning_cities']=suspension.top_cities(current)
         current['comparison']=suspension.compare(current,before,previous)
+        current['diagnosis']=saved_diagnosis
         if previous_error:current['comparison']['note']=previous_error
         return jsonify(current)
     except ValueError as exc:return jsonify({'error':str(exc)}),422
+
+@app.post('/api/suspension/diagnose')
+def suspension_diagnose():
+    try:
+        data=request.get_json(silent=True)
+        if not request.is_json or not isinstance(data,dict):raise ValueError('请求格式无效。')
+        month=data.get('month');previous=suspension.previous_month(month)
+        source=data.get('source') or None
+        if source not in (None,'manual','imported'):raise ValueError('版本选择无效。')
+        model=validate_model(data.get('model',DEFAULT_MODEL))
+        force=data.get('force',False)
+        if type(force) is not bool:raise ValueError('请求格式无效。')
+        with connect() as c:
+            current=suspension_month_snapshot(c,month,source)
+            if current is None:raise ValueError('该月或所选版本没有挂起汇总数据。')
+            try:before=suspension_month_snapshot(c,previous)
+            except ValueError:before=None
+            fingerprint=suspension_diagnosis_fingerprint(month,current,before)
+            saved=suspension_diagnosis_load(c,fingerprint)
+        if saved and not force:return jsonify(saved)
+        key=credential_store.get_assistant_key()
+        if not key:raise ValueError('请先在小助手设置中保存 DeepSeek API 密钥。')
+        evidence=suspension.diagnostic_facts(current,before,month)
+        selected_model=model
+        try:reply=diagnose_suspension(key,evidence,model=model)
+        except ValueError as exc:
+            if saved:return jsonify({'evidence':evidence,'reply':None,'notice':str(exc),'cached':False})
+            reply=suspension.local_diagnostic_advice(evidence)
+            selected_model='local'
+        created_at=datetime.now().astimezone().isoformat(timespec='seconds')
+        with connect() as c:
+            suspension_diagnosis_table(c)
+            c.execute('INSERT INTO suspension_diagnoses (fingerprint,month,source,model,evidence,reply,created_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(fingerprint) DO UPDATE SET model=excluded.model,evidence=excluded.evidence,reply=excluded.reply,created_at=excluded.created_at',
+                      (fingerprint,month,current['kind'],selected_model,json.dumps(evidence,ensure_ascii=False),reply,created_at))
+        return jsonify({'evidence':evidence,'reply':reply,'model':selected_model,'created_at':created_at,'cached':False})
+    except (ValueError,RuntimeError) as exc:return jsonify({'error':str(exc)}),400
+
 
 @app.get('/api/network/dates')
 def network_dates():
@@ -300,6 +461,8 @@ def compact_snapshot(data):
     for group,fields in group_fields.items():
         source=data[group]
         result[group]={key:source[key] for key in fields} if source is not None else None
+    if data.get('suspended',{}).get('reason_analysis') is not None:
+        result['suspended']['reason_analysis']=data['suspended']['reason_analysis']
     return result
 
 def supplement_snapshot(old, fresh):
@@ -365,7 +528,7 @@ def city_history():
 
 @app.before_request
 def protect_mail_endpoints():
-    if request.path in ('/api/mail/credential','/api/database/credential') or request.path.startswith(('/api/assistant/','/api/network/','/api/suspension/')) or request.path.endswith(('/email','/supplement-statistics')):
+    if request.path.startswith('/api/'):
         allowed={'127.0.0.1:5088','localhost:5088'}
         if app.testing: allowed.update({'localhost','127.0.0.1'})
         origin=request.headers.get('Origin')
@@ -374,7 +537,7 @@ def protect_mail_endpoints():
 
 @app.after_request
 def prevent_credential_response_caching(response):
-    if request.path in ('/api/mail/credential','/api/database/credential') or request.path.startswith(('/api/assistant/','/api/network/','/api/suspension/')): response.headers['Cache-Control']='no-store'
+    if request.path.startswith('/api/'): response.headers['Cache-Control']='no-store'
     return response
 
 @app.post('/api/network/history/import')
@@ -572,7 +735,7 @@ def assistant_query_chat():
         if plan.get('tool')=='query_network_daily':
             return jsonify({'reply':'暂时无法确定日报查询指标或范围。请说明单日日期、地市和具体指标，例如“2026年10月21日合肥5G数据流量”。','local_query':True})
         if 'tool' in plan:
-            try: result=query_statistics(connect,plan['tool'],plan['arguments'],structured=True,source_reader=wren_daily_bridge.read_snapshot if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None)
+            try: result=query_statistics(connect,plan['tool'],plan['arguments'],structured=True,source_reader=wren_daily_bridge.read_snapshot if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None,suspension_reader=selected_suspension)
             except ValueError as exc: result={'reply':str(exc)}
             if local_fallback:
                 result['summary_notice']=fallback_reason+' 本次已使用本地规则查询和生成回答。'
@@ -616,9 +779,17 @@ def generate():
             existing=c.execute('SELECT data,weekly,monthly,monthly_data,notes FROM reports WHERE period=?',(period,)).fetchone()
             if existing:
                 old_data,old_weekly,old_monthly,old_monthly_data,old_notes=existing
+                old_text=old_weekly if kind=='weekly' else old_monthly
+                if old_text:
+                    revision=hashlib.sha256(old_text.encode('utf-8')).hexdigest()
+                    requested=request.form.get('overwrite_revision','')
+                    if requested!=revision:
+                        code='report_changed' if requested else 'report_exists'
+                        return jsonify({'error':'该日期已有保存的报告，请确认后再重新生成。' if not requested else '报告在确认后发生变化，请重新核对。','code':code,'revision':revision}),409
                 if kind=='weekly': values=(encoded,old_notes,weekly,old_monthly,old_monthly_data,period)
                 else: values=(old_data if old_weekly else encoded,old_notes,old_weekly,monthly,encoded,period)
-                c.execute('UPDATE reports SET data=?,notes=?,weekly=?,monthly=?,monthly_data=? WHERE period=?',values)
+                updated=c.execute("UPDATE reports SET data=?,notes=?,weekly=?,monthly=?,monthly_data=? WHERE period=? AND data=? AND weekly=? AND monthly=? AND COALESCE(monthly_data,'')=? AND notes=?",values+(old_data,old_weekly,old_monthly,old_monthly_data or '',old_notes))
+                if updated.rowcount!=1:return jsonify({'error':'报告在操作期间发生变化，请刷新后重新核对。','code':'report_changed'}),409
             else:
                 c.execute('INSERT INTO reports (period,data,notes,weekly,monthly,monthly_data) VALUES (?,?,?,?,?,?)',(period,encoded,encoded_notes,weekly if kind=='weekly' else '',monthly if kind=='monthly' else '',encoded if kind=='monthly' else None))
             generated_at=datetime.now().astimezone().isoformat(timespec='seconds')

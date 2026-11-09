@@ -31,6 +31,25 @@ class SmartQueryTests(unittest.TestCase):
         with service.connect() as c:
             c.execute('INSERT INTO reports (period,data,notes,weekly,monthly,monthly_data) VALUES (?,?,?,?,?,?)',(period,json.dumps(week or self.week),'{}','周报' if weekly else '','月报' if monthly else '',json.dumps(month or self.month) if monthly else None))
 
+    def test_suspension_query_uses_selected_partial_bulletin_without_inventing_cities(self):
+        selected={'kind':'manual','period':None,'total':10,'cities':[{'name':'合肥','value':7}],'city_note':'仅记录部分地市'}
+        args={'month':'2026-07','city':'全省'}
+        result=query(service.connect,'query_suspended',args,structured=True,suspension_reader=lambda month:selected)
+        self.assertTrue(result['available']);self.assertIn('10处',result['reply']);self.assertIn('日期未提供',result['reply'])
+        args['city']='合肥';self.assertIn('7处',query(service.connect,'query_suspended',args,structured=True,suspension_reader=lambda month:selected)['reply'])
+        args['city']='安庆';self.assertFalse(query(service.connect,'query_suspended',args,structured=True,suspension_reader=lambda month:selected)['available'])
+        args['city']='全部地市';result=query(service.connect,'query_suspended',args,structured=True,suspension_reader=lambda month:selected);self.assertEqual(result['table']['rows'],[['合肥','7']])
+
+    @patch('app.summarize_query',side_effect=ValueError('offline'))
+    @patch('credential_store.get_assistant_key',return_value='fake')
+    def test_chat_reads_preferred_suspension_bulletin(self,key,summary):
+        payload={'month':'2026-07','total':10,'cities':{'合肥':7},'categories':{},'preferred':True}
+        self.assertEqual(self.client.post('/api/suspension/manual',json=payload).status_code,200)
+        plan={'tool':'query_suspended','arguments':{'month':'2026-07','city':'合肥'}}
+        with patch('app.plan_query',return_value=plan):
+            response=self.client.post('/api/assistant/query-chat',json={'messages':[{'role':'user','content':'2026年7月合肥挂起库数量'}]})
+        self.assertEqual(response.status_code,200);self.assertIn('7处',response.json['reply']);self.assertIn('日期未提供',response.json['reply'])
+
     def test_monthly_precedence_and_rate(self):
         self.insert()
         result=query(service.connect,'query_city_metrics',{'month':'2026-10','city':'合肥市','metric':'解决率'})
@@ -131,7 +150,7 @@ class SmartQueryTests(unittest.TestCase):
     @patch('credential_store.get_assistant_key',return_value='fake')
     def test_wren_snapshot_preserves_monthly_selection(self,key,plan,summary):
         row=[json.dumps(self.week),json.dumps(self.month),'yes','yes']
-        with patch.dict('os.environ',{'ZHIHUI_DATABASE':'postgres'}),patch('app.wren_daily_bridge.read_snapshot',return_value=row) as reader:
+        with patch.dict('os.environ',{'ZHIHUI_DATABASE':'postgres'}),patch('app.selected_suspension',return_value=None),patch('app.wren_daily_bridge.read_snapshot',return_value=row) as reader:
             r=self.client.post('/api/assistant/query-chat',json={'messages':[{'role':'user','content':'2026年10月合肥挂起库多少'}]})
         self.assertIn('7处',r.json['reply']);reader.assert_called_once_with('2026-10-30')
 

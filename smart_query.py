@@ -81,7 +81,7 @@ def _city(value):
     if value not in CITIES: raise ValueError('未识别地市，请选择安徽省 16 个地市之一。')
     return value
 
-def query(connect, name, arguments, *, structured=False, source_reader=None):
+def query(connect, name, arguments, *, structured=False, source_reader=None, suspension_reader=None):
     def output(reply,headers=None,rows=None,footnote=None,available=True):
         if not structured: return reply
         result={'reply':reply,'available':available}
@@ -95,6 +95,23 @@ def query(connect, name, arguments, *, structured=False, source_reader=None):
     metric=arguments.get('metric')
     if name=='query_city_metrics' and metric not in METRICS:
         raise ValueError('暂不支持该指标，请确认要查询的统计口径。')
+    if name=='query_suspended' and suspension_reader:
+        selected=suspension_reader(arguments['month'])
+        if selected and selected.get('kind') in ('manual','imported'):
+            total=_count(selected.get('total'))
+            origin='人工提供的月度汇总' if selected['kind']=='manual' else '指定历史工单表'
+            source_date=selected.get('period')
+            provenance=f'数据来源：{origin}；'+(f'统计日期：{source_date}。' if source_date else '具体统计日期未提供。')
+            if city=='全省':return output(f'{arguments["month"]}全省挂起库累计{total:g}处。\n{provenance}')
+            values=selected.get('cities')
+            if not isinstance(values,list):return output('该期未提供地市挂起统计。',available=False)
+            distribution={item['name']:_count(item['value']) for item in values if isinstance(item,dict) and item.get('name') in CITIES and 'value' in item}
+            if city=='全部地市':
+                table_rows=[[name,f'{distribution[name]:g}'] for name in CITIES if name in distribution]
+                footnote=provenance+(' 部分地市未提供，不按零计算。' if selected.get('city_note') else '')
+                return output(f'{arguments["month"]}全省挂起库累计{total:g}处，已记录地市情况如下。', ['地市','挂起库数量（处）'],table_rows,footnote)
+            if city not in distribution:return output(f'{arguments["month"]}{city}市挂起数量未提供，无法查询。',available=False)
+            return output(f'{arguments["month"]}{city}市挂起库累计{distribution[city]:g}处。\n{provenance}')
     if source_reader:
         row=source_reader(period)
     else:
