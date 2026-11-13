@@ -1,4 +1,8 @@
 const $=s=>document.querySelector(s); let activePeriod='',activeKind='',savedSender='',mailSubmitRequested=false;
+let savedReportTexts={weekly:'',monthly:''},reportViewGeneration=0;
+function hasUnsavedReportChanges(){return Boolean(activePeriod)&&(['weekly','monthly'].some(kind=>$('#'+kind).value!==savedReportTexts[kind]));}
+window.ZhihuiReportState={hasUnsavedChanges:hasUnsavedReportChanges};
+window.addEventListener('beforeunload',event=>{if(hasUnsavedReportChanges()){event.preventDefault();event.returnValue='';}});
 const percent=n=>(n*100).toFixed(2)+'%';
 const currentFile=document.querySelector('input[name="current"]');
 const periodInput=document.querySelector('input[name="period"]');
@@ -19,7 +23,7 @@ if(supplementButton) supplementButton.addEventListener('click',async()=>{
   catch(error){status.textContent=error.message||'补充失败，请重试。';}finally{supplementButton.disabled=false;}
 });
 function activateTab(name){document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('active',x.dataset.tab===name));['weekly','monthly','cities'].forEach(n=>$('#'+n+'-panel').hidden=n!==name)}
-function show(result,period){activePeriod=period; activeKind=result.kind; if(typeof ZhihuiCharts!=='undefined')ZhihuiCharts.renderCities(result.data.cities,period); const empty=$('#result-empty');if(empty)empty.hidden=true; $('#mail-panel').hidden=false; $('#mail-form').reset(); $('#mail-details').open=false; for(const id of ['weekly-mail-status','monthly-mail-status','mail-status']){const status=$('#'+id);if(status)status.textContent='';} loadSavedMail(); $('#mail-subject').value=`${period} 重点投诉区域${result.kind==='monthly'?'月报':'周报'}`; $('#mail-attachment-option').hidden=result.kind!=='monthly'; $('#weekly-save-status').textContent=''; $('#monthly-save-status').textContent=''; $('#result').hidden=false; $('#result-date').textContent='数据日期：'+period; $('#weekly').value=result.weekly||''; $('#monthly').value=result.monthly||''; document.querySelector('[data-tab="weekly"]').hidden=result.kind!=='weekly'; document.querySelector('[data-tab="monthly"]').hidden=result.kind!=='monthly'; $('#download').hidden=result.kind!=='monthly'; activateTab(result.kind); $('#warnings').replaceChildren(...(result.warnings||[]).map(t=>{const p=document.createElement('div');p.textContent=t;return p})); const t=result.data.total; $('#summary').innerHTML=`<div><small>确认纳入</small><strong>${t.included}<em> 处</em></strong></div><div><small>质检合格</small><strong>${t.qualified}<em> 处</em></strong></div><div><small>合格率</small><strong>${percent(t.rate)}</strong></div><div><small>挂起库</small><strong>${result.data.suspended.count}<em> 处</em></strong></div>`; const rows=[...result.data.cities,{...t,city:'总计'}]; $('#city-rows').replaceChildren(...rows.map(r=>{let tr=document.createElement('tr');[r.city,r.included,r.qualified,percent(r.rate),r.after,r.solved,percent(r.reduction)].forEach(v=>{let td=document.createElement('td');td.textContent=v;tr.append(td)});return tr})); $('#result').scrollIntoView({behavior:'smooth',block:'start'})}
+function show(result,period){if(hasUnsavedReportChanges()&&!window.confirm('当前报告有未保存的修改，切换后这些修改将丢失。确定继续吗？'))return false;reportViewGeneration++;activePeriod=period; activeKind=result.kind; if(typeof ZhihuiCharts!=='undefined')ZhihuiCharts.renderCities(result.data.cities,period); const empty=$('#result-empty');if(empty)empty.hidden=true; $('#mail-panel').hidden=false; $('#mail-form').reset(); $('#mail-details').open=false; for(const id of ['weekly-mail-status','monthly-mail-status','mail-status']){const status=$('#'+id);if(status)status.textContent='';} loadSavedMail(); $('#mail-subject').value=`${period} 重点投诉区域${result.kind==='monthly'?'月报':'周报'}`; $('#mail-attachment-option').hidden=result.kind!=='monthly'; $('#weekly-save-status').textContent=''; $('#monthly-save-status').textContent=''; $('#result').hidden=false; $('#result-date').textContent='数据日期：'+period; $('#weekly').value=result.weekly||''; $('#monthly').value=result.monthly||''; savedReportTexts={weekly:$('#weekly').value,monthly:$('#monthly').value}; document.querySelector('[data-tab="weekly"]').hidden=result.kind!=='weekly'; document.querySelector('[data-tab="monthly"]').hidden=result.kind!=='monthly'; $('#download').hidden=result.kind!=='monthly'; activateTab(result.kind); $('#warnings').replaceChildren(...(result.warnings||[]).map(t=>{const p=document.createElement('div');p.textContent=t;return p})); const t=result.data.total; $('#summary').innerHTML=`<div><small>确认纳入</small><strong>${t.included}<em> 处</em></strong></div><div><small>质检合格</small><strong>${t.qualified}<em> 处</em></strong></div><div><small>合格率</small><strong>${percent(t.rate)}</strong></div><div><small>挂起库</small><strong>${result.data.suspended.count}<em> 处</em></strong></div>`; const rows=[...result.data.cities,{...t,city:'总计'}]; $('#city-rows').replaceChildren(...rows.map(r=>{let tr=document.createElement('tr');[r.city,r.included,r.qualified,percent(r.rate),r.after,r.solved,percent(r.reduction)].forEach(v=>{let td=document.createElement('td');td.textContent=v;tr.append(td)});return tr})); $('#result').scrollIntoView({behavior:'smooth',block:'start'});return true}
 async function history(){
   try{
     const response=await fetch('/api/history');if(!response.ok)throw Error('历史记录加载失败');
@@ -33,20 +37,28 @@ async function history(){
     $('#history').replaceChildren(Object.assign(document.createElement('p'),{textContent:'历史记录加载失败，请刷新页面重试。',className:'muted'}));
   }
 }
+async function openRequestedReport(){
+  const params=new URLSearchParams(location.search),period=params.get('period'),kind=params.get('kind');
+  if(!period&&!kind)return;
+  if(!/^20\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(period||'')||!['weekly','monthly'].includes(kind)){$('#error').textContent='报告日期或类型无效，请从历史版本中选择。';$('#error').hidden=false;return;}
+  try{const response=await fetch('/api/report/'+encodeURIComponent(period)+'?kind='+encodeURIComponent(kind));const result=await response.json();if(!response.ok)throw Error('指定日期的报告尚未保存，请从历史版本中选择或生成报告。');show(result,period);}
+  catch(error){$('#error').textContent=error.message;$('#error').hidden=false;}
+}
+openRequestedReport();
 $('#form').addEventListener('submit',async e=>{e.preventDefault();$('#error').hidden=true;const kind=e.submitter?.value||'weekly';const buttons=[...document.querySelectorAll('button[name="kind"]')];buttons.forEach(b=>b.disabled=true);try{const fd=new FormData(e.target);fd.set('kind',kind);let r=await fetch('/api/generate',{method:'POST',body:fd});let d=await r.json();if(r.status===409&&d.code==='report_exists'){if(!window.confirm('该日期已有保存的'+(kind==='monthly'?'月报':'周报')+'，重新生成会替换其文字。确定继续吗？'))return;fd.set('overwrite_revision',d.revision);r=await fetch('/api/generate',{method:'POST',body:fd});d=await r.json();}if(!r.ok)throw Error(d.error||'处理失败');show(d,fd.get('period'));await history();if(typeof CityTrend!=='undefined')CityTrend.reload()}catch(err){$('#error').textContent=err.message;$('#error').hidden=false}finally{buttons.forEach(b=>b.disabled=false)}});
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>activateTab(b.dataset.tab));
 document.querySelectorAll('[data-save]').forEach(button=>button.addEventListener('click',async()=>{
   const kind=button.dataset.save, status=$('#'+kind+'-save-status');
-  const period=activePeriod, text=$('#'+kind).value;
+  const period=activePeriod, text=$('#'+kind).value,view=reportViewGeneration;
   button.disabled=true; status.textContent='正在保存…';
   try {
     const response=await fetch('/api/report/'+encodeURIComponent(period)+'/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind,text})});
     const result=await response.json(); if(!response.ok) throw Error(result.error||'保存失败');
-    status.textContent=period===activePeriod && text===$('#'+kind).value?'修改已保存':'已保存提交时的内容；当前文字有新的修改';
-  } catch(error) { status.textContent=error.message; }
+    if(view===reportViewGeneration&&period===activePeriod&&kind===activeKind){savedReportTexts[kind]=text;status.textContent=text===$('#'+kind).value?'修改已保存':'已保存提交时的内容；当前文字有新的修改';}
+  } catch(error) { if(view===reportViewGeneration)status.textContent=error.message; }
   finally { button.disabled=false; }
 }));
-['weekly','monthly'].forEach(kind=>$('#'+kind).addEventListener('input',()=>{$('#'+kind+'-save-status').textContent='有未保存的修改';}));
+['weekly','monthly'].forEach(kind=>$('#'+kind).addEventListener('input',()=>{$('#'+kind+'-save-status').textContent=$('#'+kind).value!==savedReportTexts[kind]?'有未保存的修改':'';}));
 $('#copy').onclick=async()=>{await navigator.clipboard.writeText($('#weekly').value);$('#copy').textContent='已复制';setTimeout(()=>$('#copy').textContent='复制周报',1600)};
 $('#download').onclick=()=>{if(!activePeriod)return;const form=document.createElement('form');form.method='POST';form.action='/api/export/'+activePeriod;const input=document.createElement('input');input.name='monthly';input.type='hidden';input.value=$('#monthly').value;form.append(input);document.body.append(form);form.submit();form.remove()};
 function renderCredentialStatus(){

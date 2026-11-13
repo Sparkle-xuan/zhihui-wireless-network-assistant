@@ -3,25 +3,35 @@ import re
 import network_query
 from core import CITIES
 
-# Only inherit from the immediately previous user question; never infer from model prose.
+# Resolve only contiguous, unambiguous scope follow-ups; never infer from assistant prose.
+def _network_scope_followup(text):
+    compact=re.sub(r'\s+','',text)
+    names='|'.join(CITIES)
+    match=re.fullmatch(r'(?P<scope>全省|安徽省|全部地市|各地市|各市|'+names+r')(?:市)?(?:的)?(?:呢|怎么样|如何|多少|是多少|有多少)?[？?。！!]*',compact)
+    if not match:return None
+    scope=match.group('scope')
+    if scope in ('安徽省','全省'):return '全省'
+    if scope in ('全部地市','各地市','各市'):return '全部地市'
+    return scope
+
+
 def resolve_network_followup(messages):
-    current=messages[-1]['content'].strip()
-    previous=next((m['content'] for m in reversed(messages[:-1]) if m.get('role')=='user'),None)
-    if not previous or re.search(r'对比|相比|同比|环比|趋势|排名|原因|为什么|明细|小区|黑点|挂起',current): return None
-    previous_plan=network_query.local_plan(previous)
-    if not previous_plan or 'arguments' not in previous_plan: return None
-    args=previous_plan['arguments'].copy()
-    # Only recognized terse follow-ups carry previous metric and date.
-    named=[c for c in CITIES if c in current]
-    all_cities=bool(re.search(r'各地市|全部地市|各市',current))
-    province=bool(re.search(r'全省|安徽省',current))
-    if len(named)>1 or sum((bool(named),all_cities,province))>1:return None
-    if not (named or all_cities or province):return None
-    if not re.fullmatch(r'[\s\u4e00-\u9fff0-9年月日号？?，,的呢怎么样如何多少是]+',current):return None
-    if network_query.recognize(current) not in (None,args['metric']):return None
-    if re.search(r'20\d{2}|\d{1,2}月|今天|昨天|前天|最新|本月|上月|去年|今年',current):return None
-    args['city']=named[0] if named else '全部地市' if all_cities else '全省'
-    return {'tool':'query_network_daily','arguments':args}
+    questions=[m['content'].strip() for m in messages if m.get('role')=='user']
+    if len(questions)<2:return None
+    current=_network_scope_followup(questions[-1])
+    if not current:return None
+    state=None
+    for question in questions[:-1]:
+        plan=network_query.local_plan(question)
+        if plan and 'arguments' in plan:
+            state=plan['arguments'].copy();continue
+        scope=_network_scope_followup(question)
+        if state and scope:
+            state['city']=scope;continue
+        state=None
+    if not state:return None
+    state['city']=current
+    return {'tool':'query_network_daily','arguments':state}
 
 # Semantic aliases are explicit; formulas and data remain in their existing tool.
 METRIC_CATALOG={

@@ -121,5 +121,20 @@ class DiagnosticTests(unittest.TestCase):
             with self.subTest(bad=bad),patch('assistant_service.complete',return_value=bad):
                 with self.assertRaises(ValueError):assistant_service.diagnose_suspension('key',evidence)
 
+    def test_city_opportunity_uses_only_same_city_and_record_links(self):
+        current={'period':'2026-10-30','kind':'weekly','reason_analysis':{
+            'cities':[{'city':'合肥','reason':'涉及7+9','value':3},{'city':'宣城','reason':'涉及无项目','value':7}],
+            'issue':{'available':True,'cities':[{'city':'合肥','reason':'涉及玻璃','value':2}]},
+            'issue_suspension_cities':[{'city':'合肥','issue':'涉及玻璃','suspension':'涉及7+9','value':1}],
+            'city_categories':[{'city':'合肥','category':'无项目','reason':'涉及7+9','value':2}]}}
+        result=suspension.city_opportunities(current,'合肥')
+        self.assertTrue(result['available']);self.assertIn('设备替换',result['advice'])
+        self.assertNotIn('宣城',str(result));self.assertEqual(result['same_record'][0]['value'],1)
+        self.assertIn('不能作为已确认原因',result['note'])
+        del current['reason_analysis']['issue_suspension_cities'][:]
+        result=suspension.city_opportunities(current,'合肥')
+        self.assertNotIn('玻璃和7+9的场景',result['advice'])
+        self.assertFalse(suspension.city_opportunities({'kind':'manual'},'合肥')['available'])
+
 
 if __name__=='__main__':unittest.main()

@@ -159,6 +159,15 @@ class NetworkQueryTests(unittest.TestCase):
         self.assertIsNone(query_context.resolve_network_followup([p,{'role':'user','content':'天气如何'},follow]))
         self.assertIsNone(query_context.resolve_network_followup([p,{'role':'user','content':'全省同比呢'}]))
 
+    def test_contiguous_scope_followups_and_topic_switch(self):
+        import query_context
+        messages=[{'role':'user','content':'2026年10月21日合肥5G流量'}, {'role':'assistant','content':'模拟回答'}, {'role':'user','content':'全省呢'}, {'role':'assistant','content':'模拟回答'}, {'role':'user','content':'宣城呢'}]
+        self.assertEqual(query_context.resolve_network_followup(messages)['arguments'],{'day':'2026-10-21','city':'宣城','metric':'5G数据流量'})
+        messages.insert(-1,{'role':'user','content':'聊聊天'})
+        self.assertIsNone(query_context.resolve_network_followup(messages))
+        messages=[{'role':'user','content':'2026年10月21日合肥5G流量'}, {'role':'user','content':'宣城网络为什么慢'}]
+        self.assertIsNone(query_context.resolve_network_followup(messages))
+
     def test_overview_requires_unambiguous_date_and_scope(self):
         for question in ('简述日报内容','简述10月21日和10月22日日报内容','简述10月21日合肥日报内容','总结10月21日日报小区明细'):
             with self.subTest(question=question):self.assertIn('error',q.overview_plan([{'role':'user','content':question}]))

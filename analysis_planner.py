@@ -79,26 +79,27 @@ def create_plan(key,messages,model):
         return validate_plan(json.loads(raw),messages)
     except (requests.RequestException,ValueError,KeyError,TypeError,IndexError):return None
 
-def _read_cities(connect,month,source_reader):
+def _read_cities(connect,month,source_reader,*,with_source=False):
     result=query_statistics(connect,'query_city_metrics',{'month':month,'city':'全部地市','metric':'解决率'},structured=True,source_reader=source_reader)
-    if not result.get('available') or not result.get('table'):return None,result.get('reply','数据缺失。')
+    if not result.get('available') or not result.get('table'):
+        return (None,result.get('reply','数据缺失。'),None) if with_source else (None,result.get('reply','数据缺失。'))
     values={}
     for city,included,qualified,_ in result['table']['rows']:
         denominator=Fraction(included);numerator=Fraction(qualified)
         if numerator>denominator:raise ValueError('质检合格数大于纳入数，请核对该期数据。')
         values[city]=None if denominator==0 else numerator/denominator
-    return values,None
+    return (values,None,result.get('source_info')) if with_source else (values,None)
 
 def execute(plan,connect,*,source_reader=None):
     if plan['operation']=='clarify':return {'reply':'请说明要比较的两个月，以及地市或最高解决率范围。','available':False}
-    now,error=_read_cities(connect,plan['month'],source_reader)
+    now,error,now_source=_read_cities(connect,plan['month'],source_reader,with_source=True)
     if error:return {'reply':error,'available':False}
     if plan['operation']=='highest_compare':
         eligible={city:rate for city,rate in now.items() if rate is not None}
         if not eligible:return {'reply':'该月各地市均无纳入黑点，无法比较解决率。','available':False}
         best=max(eligible.values());cities=[c for c in CITIES if eligible.get(c)==best]
     else:cities=[plan['city']]
-    before,error=_read_cities(connect,plan['other_month'],source_reader)
+    before,error,before_source=_read_cities(connect,plan['other_month'],source_reader,with_source=True)
     if error:return {'reply':f"{plan['other_month']}对照数据不可用：{error}",'available':False}
     rows=[]
     for city in cities:
@@ -108,4 +109,5 @@ def execute(plan,connect,*,source_reader=None):
         rows.append([city,f'{float(a)*100:.2f}%',f'{float(b)*100:.2f}%',f'{delta:+.2f}个百分点'])
     scope='、'.join(cities)+'（并列最高）' if plan['operation']=='highest_compare' and len(cities)>1 else cities[0]+('（最高）' if plan['operation']=='highest_compare' else '')
     summary=f"{plan['month']}黑点解决率{scope}；与{plan['other_month']}相比，"+'；'.join(f'{r[0]}本期{r[1]}、对照期{r[2]}，变化{r[3]}' for r in rows)+'。'
-    return {'reply':summary,'available':True,'table':{'headers':['地市',plan['month']+'解决率',plan['other_month']+'解决率','变化'],'rows':rows,'footnote':f"数据日期：{_last_friday(plan['month'])}、{_last_friday(plan['other_month'])}；解决率为质检合格数除以确认纳入数，按未四舍五入比率计算；无分母不参与排名。"}}
+    note=f"数据日期：{now_source['period']}（{now_source['kind']}）、{before_source['period']}（{before_source['kind']}）；解决率为质检合格数除以确认纳入数，按未四舍五入比率计算；无分母不参与排名。"
+    return {'reply':summary,'available':True,'table':{'headers':['地市',plan['month']+'解决率',plan['other_month']+'解决率','变化'],'rows':rows,'footnote':note},'evidence':note}

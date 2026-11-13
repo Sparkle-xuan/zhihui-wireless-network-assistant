@@ -93,7 +93,7 @@ def plan_query(key,messages,*,model=DEFAULT_MODEL):
         if not content or len(content)>5000: raise ValueError('每条消息需在 1 至 5000 字以内。')
         clean.append({'role':item['role'],'content':content})
     if clean[-1]['role']!='user' or sum(len(m['content']) for m in clean)>24000: raise ValueError('对话内容过长，请刷新页面后重试。')
-    system=SYSTEM+f' 当前日期为 {date.today().isoformat()}。用户查询本地黑点统计时必须调用工具；没有工具结果时不得声称已查询或给出统计数字。用户只说月份时默认当前年份，明确年份或对话上下文优先；月份不明确时询问用户。地市解决率默认全部地市，挂起数量默认全省；项目进展选择项目进展，汇聚黑点量选择汇聚黑点量，关联投诉量不确定口径则选关联投诉量。申请挂起与挂起库是同一业务指标，统一使用 query_suspended；数据源不一致时由系统提示核对。当前不支持跨月对比、排名、挂起原因或类别查询，此类问题应明确说明暂不支持，不得用单月数量冒充结果。无线网络运行日报的流量、用户和网络质量应使用 query_network_daily，必须有明确单日或用户要求最新，不要使用黑点指标；原始明细与具体原因不能查询。只调用一个工具，不支持的问题说明暂不支持。'
+    system=SYSTEM+f' 当前日期为 {date.today().isoformat()}。用户查询本地黑点统计时必须调用工具；没有工具结果时不得声称已查询或给出统计数字。用户只说月份时默认当前年份，明确年份或对话上下文优先；月份不明确时询问用户。地市解决率默认全部地市，挂起数量默认全省；项目进展选择项目进展，汇聚黑点量选择汇聚黑点量，关联投诉量不确定口径则选关联投诉量。申请挂起与挂起库是同一业务指标，统一使用 query_suspended；数据源不一致时由系统提示核对。本次规划工具只负责单月数量和明细汇总；跨月比较、排名及挂起原因由其他受控查询处理，超出工具能力时不得用单月数量冒充结果。无线网络运行日报的流量、用户和网络质量应使用 query_network_daily，必须有明确单日或用户要求最新，不要使用黑点指标；原始明细与具体原因不能查询。只调用一个工具，不支持的问题说明暂不支持。'
     try:
         response=requests.post(ENDPOINT,headers={'Authorization':f'Bearer {key}','Content-Type':'application/json'},json={'model':model,'thinking':{'type':'disabled'},'messages':[{'role':'system','content':system}]+clean,'tools':TOOLS,'tool_choice':'auto','max_tokens':1200},timeout=(6,25),allow_redirects=False)
     except requests.Timeout as exc: raise ValueError('DeepSeek 响应超时，请稍后重试。') from exc

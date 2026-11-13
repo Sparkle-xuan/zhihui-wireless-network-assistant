@@ -1,5 +1,6 @@
 import json
 import hashlib
+import uuid
 import os
 import re
 import sqlite3
@@ -8,10 +9,10 @@ import sys
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from flask import Flask, jsonify, render_template, request, send_file
+from flask import Flask, jsonify, render_template, request, send_file, redirect
 sys.path.insert(0,str(Path(__file__).parent / '.deps'))
 from core import analyze, reports, export_monthly, CITIES
-from mailing import send_report
+from mailing import send_report, MailNotSentError
 from assistant_service import complete as complete_chat
 from assistant_service import plan_query, summarize_query, validate_model, diagnose_suspension, DEFAULT_MODEL
 from smart_query import query as query_statistics, identify_explicit_metric, local_query_plan, highest_resolution_plan, highest_resolution
@@ -22,10 +23,28 @@ import network_query
 import query_context
 import analysis_planner
 import ranking_planner
+import query_router
+import conversation_query
+import intent_router
+import assistant_actions
 import wren_daily_bridge
 import network_document
 import suspension
 import suspension_reasons
+import blackspot_history
+import analysis_mail
+import city_alerts
+import analysis_readiness
+import alert_rules
+import city_followups
+import followup_query
+import intelligence_brief
+import suspension_knowledge
+import evaluation_suite
+import guided_followup
+import dashboard_data
+import dashboard_insights
+import blackspot_details
 
 app=Flask(__name__,instance_relative_config=True)
 from complaint_routes import complaints
@@ -61,13 +80,285 @@ def connect():
     finally: c.close()
 
 @app.get('/')
-def index(): return render_template('index.html')
+def index():
+    if request.args.get('period'):
+        return redirect('/reports?'+request.query_string.decode('ascii',errors='ignore'))
+    return render_template('dashboard.html')
+
+@app.get('/reports')
+def reports_page(): return render_template('index.html')
+
+@app.get('/api/dashboard/network')
+def dashboard_network():
+    try:
+        with connect() as c:network_daily.schema(c)
+        source=wren_daily_bridge.read_rows if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None
+        return jsonify(dashboard_data.network(connect,request.args.get('day','latest'),request.args.get('metric','5G数据流量'),source_reader=source))
+    except (ValueError,RuntimeError) as exc:return jsonify({'error':str(exc) or '网络数据暂不可用。'}),400
+
+@app.get('/api/dashboard/monthly')
+def dashboard_monthly():
+    try:
+        month=request.args.get('month','')
+        if not re.fullmatch(r'20\d{2}-(0[1-9]|1[0-2])',month):raise ValueError('请选择有效月份。')
+        source=wren_daily_bridge.read_snapshot if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None
+        return jsonify(dashboard_data.monthly(connect,month,source_reader=source,suspension_reader=selected_suspension))
+    except (ValueError,RuntimeError) as exc:return jsonify({'error':str(exc) or '月度数据暂不可用。'}),400
+
+@app.get('/api/dashboard/blackspot-details')
+def dashboard_blackspot_details():
+    try:
+        period=request.args.get('period','');window=request.args.get('window','30');offset=int(request.args.get('offset','0'))
+        with connect() as c:return jsonify(blackspot_details.read(c,period,window,offset))
+    except (ValueError,TypeError) as exc:return jsonify({'error':str(exc) or '明细查询条件无效。'}),400
+
+@app.post('/api/dashboard/blackspot-details')
+def dashboard_blackspot_details_import():
+    try:
+        period=request.form.get('period','');upload=request.files.get('file')
+        if not upload or not upload.filename or not upload.filename.lower().endswith('.xlsx'):raise ValueError('请选择 .xlsx 工单表。')
+        if blackspot_details.filename_date(upload.filename)!=period:raise ValueError('文件名中的日期与当前选中报告的统计日期不一致。')
+        records=blackspot_details.extract(upload.stream)
+        source=wren_daily_bridge.read_snapshot if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None
+        selected=dashboard_data.monthly(connect,period[:7],source_reader=source,suspension_reader=selected_suspension)
+        if (selected.get('source_info') or {}).get('period')!=period:raise ValueError('当前月份的统计版本已变化，请刷新页面后重新导入。')
+        cities=selected.get('cities') or []
+        if len(cities)!=16 or len({city['name'] for city in cities})!=16:raise ValueError('当前报告的地市汇总不完整，暂不能核对明细。')
+        if sum(city['included'] for city in cities)!=len(records):raise ValueError('表格中的确认纳入数量与当前报告不一致，请核对文件版本。')
+        with connect() as c:inserted=blackspot_details.save(c,period,records,request.form.get('revision') or None)
+        return jsonify({'ok':True,'inserted':inserted,'count':len(records),'period':period})
+    except blackspot_details.Conflict as exc:return jsonify({'error':str(exc),'code':'details_conflict','revision':exc.revision}),409
+    except (ValueError,TypeError) as exc:return jsonify({'error':str(exc) or '明细导入失败。'}),400
+
+def dashboard_insight_data(month, day):
+    if not isinstance(month,str) or not re.fullmatch(r'20\d{2}-(0[1-9]|1[0-2])',month):raise ValueError('请选择有效月份。')
+    postgres=os.environ.get('ZHIHUI_DATABASE')=='postgres'
+    source=wren_daily_bridge.read_snapshot if postgres else None
+    network_source=wren_daily_bridge.read_rows if postgres else None
+    with connect() as c:network_daily.schema(c)
+    return dashboard_insights.build(month,day,
+        lambda m: dashboard_data.monthly(connect,m,source_reader=source,suspension_reader=selected_suspension),
+        lambda d: dashboard_data.network(connect,d,'5G数据流量',source_reader=network_source))
+
+@app.get('/api/dashboard/insights')
+def dashboard_insights_view():
+    try:return jsonify(dashboard_insight_data(request.args.get('month',''),request.args.get('day','latest')))
+    except (ValueError,RuntimeError,TypeError) as exc:return jsonify({'error':str(exc) or '首页分析暂不可用。'}),400
+
+@app.post('/api/dashboard/insights/summary')
+def dashboard_insights_summary():
+    data=request.get_json(silent=True)
+    if not isinstance(data,dict):return jsonify({'error':'请求格式无效。'}),400
+    try:
+        model=validate_model(data.get('model',DEFAULT_MODEL))
+        facts=dashboard_insight_data(data.get('month',''),data.get('day','latest'))
+        if not facts['summary']:raise ValueError('当前没有可用于分析的汇总数据。')
+        key=credential_store.get_assistant_key()
+        if not key:raise ValueError('请先在智徽助手设置中配置 DeepSeek 密钥。')
+        reply=summarize_query(key,'简述全省网络和黑点情况',{'reply':facts['summary']},model=model)
+        return jsonify({'reply':reply})
+    except (ValueError,RuntimeError,TypeError) as exc:return jsonify({'error':str(exc) or '智能解读暂不可用。'}),400
+
+@app.get('/api/intelligence/brief')
+def intelligence_summary():
+    try:
+        month=request.args.get('month','')
+        if not re.fullmatch(r'20\d{2}-(0[1-9]|1[0-2])',month):raise ValueError('请选择有效月份。')
+        postgres=os.environ.get('ZHIHUI_DATABASE')=='postgres'
+        return jsonify(intelligence_brief.build(connect,month,
+            source_reader=wren_daily_bridge.read_snapshot if postgres else None,
+            suspension_reader=selected_suspension,
+            network_reader=wren_daily_bridge.read_rows if postgres else None))
+    except (ValueError,RuntimeError) as exc:return jsonify({'error':str(exc) or '暂时无法读取本地数据。'}),400
 
 @app.get('/network')
 def network_page(): return render_template('network.html')
 
 @app.get('/suspension')
 def suspension_page(): return render_template('suspension.html')
+
+@app.get('/analysis-report')
+def analysis_report_page(): return render_template('analysis_report_page.html')
+
+@app.get('/assistant-evaluation')
+def assistant_evaluation_page():
+    labels={'suspension_growth':'挂起连续增长','daily_comparison':'日报跨日比较','suspension':'挂起数量与排名','ranked_comparison':'解决率排名对比','city_comparison':'地市解决率对比','suspension_reason':'挂起原因','analysis':'黑点多月分析','ranking':'解决率排名','highest_resolution':'最高解决率','network_comparison':'网络指标比较','network_overview':'网络日报概览','network_metric':'单日网络指标','general':'普通问答或未识别'}
+    return render_template('assistant_evaluation.html',routes=evaluation_suite.ROUTES,route_labels=labels)
+
+@app.route('/api/assistant/evaluation',methods=['GET','POST'])
+def assistant_evaluation():
+    try:
+        if request.method=='GET':return jsonify(evaluation_suite.run(connect))
+        data=request.get_json(silent=True)
+        if not isinstance(data,dict):raise ValueError('测试题格式无效。')
+        ident=evaluation_suite.add(connect,data.get('category'),data.get('question'),data.get('expected_route'))
+        return jsonify({'id':ident,'message':'测试题已保存，请运行测试。'})
+    except (ValueError,TypeError) as exc:return jsonify({'error':str(exc)}),400
+
+@app.post('/api/assistant/evaluation/run')
+def assistant_evaluation_run():
+    return jsonify(evaluation_suite.run_and_compare(connect))
+
+@app.get('/city-alerts')
+def city_alerts_page(): return render_template('city_alerts.html',cities=CITIES)
+
+@app.route('/api/blackspot/history/versions',methods=['GET','POST'])
+def blackspot_history_versions():
+    try:
+        payload=request.get_json(silent=True) if request.method=='POST' else request.args
+        if not payload or not hasattr(payload,'get'):raise ValueError('请选择月份。')
+        month=payload.get('month','')
+        if not isinstance(month,str) or not re.fullmatch(r'20\d{2}-(0[1-9]|1[0-2])',month):raise ValueError('请选择有效月份。')
+        if request.method=='POST':blackspot_history.select_version(connect,month,payload.get('source_date'))
+        return jsonify(blackspot_history.versions(connect,month))
+    except (ValueError,TypeError) as exc:return jsonify({'error':str(exc) or '历史版本无效。'}),400
+
+@app.route('/api/city-alerts/contacts',methods=['GET','POST'])
+def city_alert_contacts():
+    try:
+        if request.method=='GET':return jsonify({'items':city_alerts.contacts(connect)})
+        payload=request.get_json(silent=True)
+        if not isinstance(payload,dict):raise ValueError('联系人格式无效。')
+        city_alerts.save_contacts(connect,payload.get('items'))
+        return jsonify({'ok':True,'message':'地市邮箱已保存。'})
+    except (ValueError,TypeError) as exc:return jsonify({'error':str(exc)}),400
+
+@app.route('/api/city-followups',methods=['GET','POST'])
+def city_followup_records():
+    try:
+        if request.method=='POST':return jsonify({'ok':True,'id':city_followups.save(connect,request.get_json(silent=True)),'message':'推进记录已保存。'})
+        source=wren_daily_bridge.read_snapshot if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None
+        return jsonify({'items':city_followups.list_records(connect,source_reader=source,suspension_reader=selected_suspension)})
+    except (ValueError,TypeError) as exc:return jsonify({'error':str(exc) or '推进记录无效。'}),400
+
+@app.route('/api/city-alerts/schedule',methods=['GET','POST'])
+def city_alert_schedule():
+    try:
+        if request.method=='GET':return jsonify(city_alerts.schedule(connect))
+        payload=request.get_json(silent=True)
+        if not isinstance(payload,dict):raise ValueError('定时设置无效。')
+        city_alerts.set_schedule(connect,payload.get('enabled'),payload.get('hour'),payload.get('minute'))
+        return jsonify({'ok':True,'message':'定时设置已保存。'})
+    except (ValueError,TypeError) as exc:return jsonify({'error':str(exc)}),400
+
+@app.route('/api/city-alerts/rules',methods=['GET','POST'])
+def city_alert_rules():
+    try:
+        if request.method=='GET':return jsonify(alert_rules.get(connect))
+        alert_rules.save(connect,request.get_json(silent=True))
+        return jsonify({'ok':True,'message':'预警规则已保存。已有草稿需更新后重新核对。'})
+    except (ValueError,TypeError) as exc:return jsonify({'error':str(exc)}),400
+
+@app.route('/api/city-alerts/<month>',methods=['GET','POST'])
+def city_alert_month(month):
+    try:
+        if request.method=='POST':
+            payload=request.get_json(silent=True) or {}
+            if not isinstance(payload,dict) or type(payload.get('replace_drafts',False)) is not bool:raise ValueError('请求格式无效。')
+            source=wren_daily_bridge.read_snapshot if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None
+            city_alerts.generate(connect,month,source_reader=source,suspension_reader=selected_suspension,replace_drafts=payload.get('replace_drafts',False))
+        return jsonify(city_alerts.list_alerts(connect,month))
+    except (ValueError,TypeError) as exc:return jsonify({'error':str(exc) or '告警数据无效。'}),400
+
+@app.post('/api/city-alerts/<month>/<city>/send')
+def city_alert_send(month,city):
+    payload=request.get_json(silent=True)
+    if not isinstance(payload,dict):return jsonify({'error':'邮件请求格式无效。'}),400
+    sender=payload.get('sender','');auth=payload.get('auth_code','')
+    if not isinstance(sender,str) or not isinstance(auth,str):return jsonify({'error':'发件信息无效。'}),400
+    started=False
+    try:
+        from mailing import ADDRESS
+        if len(sender.strip())>254 or not ADDRESS.fullmatch(sender.strip()):raise ValueError('请输入有效的 QQ 发件邮箱。')
+        if not auth:auth=credential_store.get_for_sender(sender) or ''
+        if not auth or len(auth)>256:raise ValueError('请输入或保存该发件邮箱的有效授权码。')
+        recipient,subject,body=(payload.get(k) for k in ('recipient','subject','body'))
+        source=wren_daily_bridge.read_snapshot if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None
+        _,_,fingerprint=city_alerts.calculate(connect,month,source_reader=source,suspension_reader=selected_suspension)
+        city_alerts.prepare_send(connect,month,city,recipient,subject,body,fingerprint)
+        started=True
+        try:send_report(sender,recipient,auth,subject,body)
+        except MailNotSentError:
+            city_alerts.finish_send(connect,month,city,'draft')
+            started=False
+            raise
+        except Exception:
+            city_alerts.finish_send(connect,month,city,'unknown')
+            raise
+        city_alerts.finish_send(connect,month,city,'sent')
+        return jsonify({'ok':True,'message':'QQ 邮箱服务器已接受邮件，请在发件箱核对。'})
+    except (ValueError,TypeError,RuntimeError) as exc:return jsonify({'error':str(exc) or '发送状态未确认，请检查发件箱。','locked':started}),400
+
+@app.post('/api/city-alerts/<month>/<city>/reset')
+def city_alert_reset(month,city):
+    payload=request.get_json(silent=True)
+    if not isinstance(payload,dict) or payload.get('confirmed_not_sent') is not True:return jsonify({'error':'请先检查发件箱并确认该邮件未发出。'}),400
+    try:
+        city_alerts.reset_uncertain(connect,month,city)
+        return jsonify({'ok':True,'message':'已恢复草稿，请重新核对后发送。'})
+    except (ValueError,TypeError) as exc:return jsonify({'error':str(exc)}),400
+
+@app.post('/api/analysis-report')
+def create_analysis_report():
+    data=request.get_json(silent=True)
+    if not isinstance(data,dict):return jsonify({'error':'请求格式无效。'}),400
+    try:
+        month=data.get('month')
+        if not isinstance(month,str) or not re.fullmatch(r'20\d{2}-(0[1-9]|1[0-2])',month):raise ValueError('请选择有效统计月份。')
+        city=data.get('city') or None
+        if city is not None and city not in CITIES:raise ValueError('请选择有效地市。')
+        model=validate_model(data.get('model',DEFAULT_MODEL))
+        from analysis_report import create_report
+        source=wren_daily_bridge.read_snapshot if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None
+        result=create_report(month,connect,source_reader=source,key=None if city else credential_store.get_assistant_key(),model=model)
+        html=render_template('analysis_city_report_document.html' if city else 'analysis_report_document.html',city=city,**result)
+        report_id=analysis_mail.save(month,html)
+        return jsonify({'html':html,'month':month,'advice_notice':result['advice_notice'],'report_id':report_id})
+    except (ValueError,RuntimeError) as exc:return jsonify({'error':str(exc)}),400
+
+@app.get('/api/analysis-report/readiness')
+def analysis_report_readiness():
+    try:
+        month=request.args.get('month','')
+        if not re.fullmatch(r'20\d{2}-(0[1-9]|1[0-2])',month):raise ValueError('请选择有效统计月份。')
+        source=wren_daily_bridge.read_snapshot if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None
+        return jsonify(analysis_readiness.check(month,connect,source_reader=source))
+    except (ValueError,RuntimeError) as exc:return jsonify({'error':str(exc)}),400
+
+
+@app.post('/api/analysis-report/email')
+def analysis_report_email():
+    payload=request.get_json(silent=True)
+    if not isinstance(payload,dict):return jsonify({'error':'邮件请求格式无效。'}),400
+    fields=[payload.get(k,'') for k in ('report_id','sender','recipient','auth_code','subject','body')]
+    if not all(isinstance(x,str) for x in fields):return jsonify({'error':'邮件字段格式无效。'}),400
+    report_id,sender,recipient,auth_code,subject,body=fields
+    if not re.fullmatch(r'[0-9a-f]{32}',report_id):return jsonify({'error':'请先生成并核对分析报告。'}),400
+    try:
+        if not auth_code:auth_code=credential_store.get_for_sender(sender) or ''
+        if not auth_code:raise ValueError('没有该发件邮箱已保存的授权码，请先填写或保存。')
+        if len(auth_code)>256:raise ValueError('QQ 邮箱 SMTP 授权码过长。')
+        # Validate before marking the preview in flight.
+        from mailing import ADDRESS
+        if not ADDRESS.fullmatch(sender.strip()) or len(sender.strip())>254:raise ValueError('请输入有效的发件邮箱地址。')
+        if not ADDRESS.fullmatch(recipient.strip()) or len(recipient.strip())>254:raise ValueError('请输入一个有效的收件邮箱地址。')
+        if not subject.strip() or len(subject)>200 or '\n' in subject or '\r' in subject:raise ValueError('邮件主题无效。')
+        if not body.strip() or len(body)>10000:raise ValueError('请填写不超过 10000 字的邮件说明。')
+        month,html=analysis_mail.begin(report_id)
+        try:
+            formatted=analysis_mail.email_html(html,body)
+            attachment=(html.encode('utf-8'),f'{month}黑点解决情况分析报告.html','text','html')
+            send_report(sender,recipient,auth_code,subject,body+'\n\n完整分析报告见邮件正文及 HTML 附件。',attachment,html_body=formatted)
+        except MailNotSentError:
+            analysis_mail.finish(report_id,'ready')
+            raise
+        except Exception:
+            # Delivery errors may occur after the server accepted the message.
+            analysis_mail.finish(report_id,'unknown')
+            raise
+        analysis_mail.finish(report_id,'sent')
+        return jsonify({'ok':True,'message':'QQ 邮箱服务器已接受邮件，请在发件箱核对。'})
+    except (ValueError,TypeError,RuntimeError) as exc:return jsonify({'error':str(exc) or '邮件信息无效。'}),400
 
 def suspension_last_friday(month):
     import calendar
@@ -228,6 +519,24 @@ def suspension_import():
         return jsonify({'ok':True,'message':'已保存该月挂起汇总。'})
     except (ValueError,TypeError) as exc:return jsonify({'error':str(exc) or '文件或日期无效。'}),400
 
+
+@app.post('/api/blackspot/history/import')
+def import_blackspot_history():
+    try:
+        source_date=request.form.get('source_date','')
+        if date.fromisoformat(source_date).isoformat()!=source_date:raise ValueError('请选择有效的统计日期。')
+        upload=request.files.get('file')
+        if not upload or not upload.filename or not upload.filename.lower().endswith('.xlsx'):raise ValueError('请选择 .xlsx 格式的当年工单表。')
+        dates=set()
+        for m in re.finditer(r'(?<!\d)(20\d{2})[-_.年]?(\d{2})[-_.月]?(\d{2})(?:日)?(?!\d)',upload.filename):
+            try:dates.add(date(*map(int,m.groups())).isoformat())
+            except ValueError:pass
+        if dates!={source_date}:raise ValueError('文件名中的日期与所选统计日期不一致，请核对。')
+        data=analyze(upload.stream)
+        inserted=blackspot_history.save(connect,source_date,data)
+        return jsonify({'ok':True,'source_date':source_date,'inserted':inserted,'city_count':len(data['cities'])})
+    except (ValueError,TypeError) as exc:return jsonify({'error':str(exc) or '文件或日期无效。'}),400
+
 @app.post('/api/suspension/manual')
 def suspension_manual_save():
     try:
@@ -254,6 +563,29 @@ def suspension_manual_save():
 
 def selected_suspension(month):
     with connect() as c:return suspension_month_snapshot(c,month)
+
+@app.get('/api/suspension/opportunities')
+def suspension_opportunities():
+    try:
+        month=request.args.get('month','');city=request.args.get('city','');source=request.args.get('source','')
+        suspension.previous_month(month)
+        if source not in ('','manual','imported'):raise ValueError('数据版本无效。')
+        with connect() as c:current=suspension_month_snapshot(c,month,source or None)
+        if not current:raise ValueError('该月没有所选版本的挂起统计。')
+        result=suspension.city_opportunities(current,city)
+        if result.get('available'):result['knowledge']=suspension_knowledge.match(connect,result)
+        return jsonify(result)
+    except (ValueError,TypeError) as exc:return jsonify({'error':str(exc) or '无法分析挂起数据。'}),400
+
+@app.route('/api/suspension/knowledge',methods=['GET','POST'])
+def suspension_knowledge_settings():
+    try:
+        if request.method=='GET':return jsonify(suspension_knowledge.list_all(connect))
+        data=request.get_json(silent=True)
+        if not isinstance(data,dict):raise ValueError('建议格式无效。')
+        suspension_knowledge.save(connect,data.get('kind'),data.get('label'),data.get('advice'))
+        return jsonify({'ok':True,'message':'本地推进建议已保存。'})
+    except (ValueError,TypeError) as exc:return jsonify({'error':str(exc)}),400
 
 
 def suspension_diagnosis_fingerprint(month,current,previous):
@@ -623,18 +955,110 @@ def assistant_chat():
         return jsonify({'reply':reply})
     except (ValueError,RuntimeError) as exc: return jsonify({'error':str(exc)}),400
 
+@app.route('/api/assistant/feedback', methods=['GET','POST'])
+def assistant_feedback():
+    with connect() as c:
+        c.execute('CREATE TABLE IF NOT EXISTS assistant_feedback (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, rating TEXT NOT NULL, reason TEXT NOT NULL, question TEXT NOT NULL)')
+        c.execute('CREATE TABLE IF NOT EXISTS assistant_feedback_review (id TEXT PRIMARY KEY, expected TEXT NOT NULL, reviewed_at TEXT NOT NULL)')
+        if request.method=='GET':
+            rows=c.execute('SELECT f.id,f.created_at,f.rating,f.reason,f.question,r.expected,r.reviewed_at FROM assistant_feedback f LEFT JOIN assistant_feedback_review r ON f.id=r.id ORDER BY f.created_at DESC LIMIT 100').fetchall()
+            return jsonify({'items':[{'id':r[0],'created_at':r[1],'rating':r[2],'reason':r[3],'question':r[4],'expected':r[5] or '', 'reviewed_at':r[6] or ''} for r in rows]})
+        data=request.get_json(silent=True)
+        if not isinstance(data,dict):return jsonify({'error':'反馈格式无效。'}),400
+        rating=data.get('rating');reason=data.get('reason','');question=data.get('question')
+        if rating not in ('helpful','incorrect') or not isinstance(reason,str) or len(reason)>500 or not isinstance(question,str) or not 1<=len(question.strip())<=5000:
+            return jsonify({'error':'反馈内容无效。'}),400
+        if rating=='incorrect' and not reason.strip():return jsonify({'error':'请填写问题描述。'}),400
+        c.execute('INSERT INTO assistant_feedback (id,created_at,rating,reason,question) VALUES (?,?,?,?,?)',
+                  (str(uuid.uuid4()),datetime.now().isoformat(timespec='seconds'),rating,reason.strip(),question.strip()))
+    return jsonify({'saved':True})
+
+@app.post('/api/assistant/feedback/review')
+def review_assistant_feedback():
+    data=request.get_json(silent=True)
+    if not isinstance(data,dict):return jsonify({'error':'反馈格式无效。'}),400
+    ident=data.get('id');expected=data.get('expected')
+    if not isinstance(ident,str) or not re.fullmatch(r'[0-9a-f-]{36}',ident) or not isinstance(expected,str) or not expected.strip() or len(expected)>500:
+        return jsonify({'error':'请填写不超过 500 字的期望结果。'}),400
+    with connect() as c:
+        c.execute('CREATE TABLE IF NOT EXISTS assistant_feedback (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, rating TEXT NOT NULL, reason TEXT NOT NULL, question TEXT NOT NULL)')
+        c.execute('CREATE TABLE IF NOT EXISTS assistant_feedback_review (id TEXT PRIMARY KEY, expected TEXT NOT NULL, reviewed_at TEXT NOT NULL)')
+        if not c.execute("SELECT id FROM assistant_feedback WHERE id=? AND rating='incorrect'",(ident,)).fetchone():return jsonify({'error':'未找到待核对的错误反馈。'}),400
+        c.execute('INSERT INTO assistant_feedback_review (id,expected,reviewed_at) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET expected=excluded.expected,reviewed_at=excluded.reviewed_at',(ident,expected.strip(),datetime.now().isoformat(timespec='seconds')))
+    return jsonify({'saved':True,'message':'已保存人工核对结果，未自动修改查询规则。'})
+
+
 @app.post('/api/assistant/query-chat')
 def assistant_query_chat():
     try:
         data=request.get_json(silent=True)
         if not request.is_json or not isinstance(data,dict): raise ValueError('请求格式无效。')
-        key=credential_store.get_assistant_key()
-        if not key: raise ValueError('请先在机器人设置中保存 DeepSeek API 密钥。')
         model=validate_model(data.get('model',DEFAULT_MODEL))
         messages=data.get('messages')
         if not isinstance(messages,list) or not 1<=len(messages)<=12 or any(not isinstance(m,dict) or m.get('role') not in ('user','assistant') or not isinstance(m.get('content'),str) or not 1<=len(m['content'].strip())<=5000 for m in messages) or messages[-1].get('role')!='user' or sum(len(m['content']) for m in messages)>24000:
             raise ValueError('对话内容无效或过长，请重新输入。')
-        if analysis_planner.should_plan(messages):
+        action=assistant_actions.report_conversation(messages) or assistant_actions.plan(messages[-1]['content'])
+        if action:return jsonify(action)
+        source=wren_daily_bridge.read_snapshot if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None
+        guided=guided_followup.execute(messages,connect,source_reader=source,context=data.get('query_context'))
+        if guided:return jsonify(guided)
+        attention=guided_followup.initial(messages[-1]['content'],connect,source_reader=source)
+        if attention:return jsonify(attention)
+        followup=followup_query.plan(messages[-1]['content'])
+        if followup:
+            if 'error' in followup:return jsonify({'reply':followup['error'],'local_query':True})
+            source=wren_daily_bridge.read_snapshot if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None
+            records=city_followups.list_records(connect,source_reader=source,month=followup.get('month'),city=followup.get('city'),include_comparison=False)
+            alerts=city_alerts.list_alerts(connect,followup['month'])['items'] if followup.get('month') else []
+            return jsonify(followup_query.answer(followup,records,alerts))
+        key=credential_store.get_assistant_key()
+        if not key: raise ValueError('请先在机器人设置中保存 DeepSeek API 密钥。')
+        route,route_plan=intent_router.route(messages)
+        if route=='suspension_growth':
+            if 'error' in route_plan:return jsonify({'reply':route_plan['error'],'local_query':True})
+            result=conversation_query.execute_growth(route_plan,selected_suspension)
+            return jsonify({**result,'local_query':True})
+        if route=='daily_comparison':
+            daily_comparison=route_plan
+            if 'error' in daily_comparison:return jsonify({'reply':daily_comparison['error'],'local_query':True})
+            try:result=network_query.compare(connect,daily_comparison,source_reader=wren_daily_bridge.read_rows if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None)
+            except ValueError as exc:result={'reply':str(exc),'available':False}
+            result.pop('available',None)
+            return jsonify({**result,'local_query':True})
+        if route=='suspension':
+            suspension_plan=route_plan
+            if 'error' in suspension_plan:return jsonify({'reply':suspension_plan['error'],'local_query':True})
+            try:result=conversation_query.execute_suspension(suspension_plan,selected_suspension)
+            except ValueError as exc:result={'reply':str(exc)}
+            return jsonify({**result,'local_query':True})
+        if route=='ranked_comparison':
+            compound=route_plan
+            if 'error' in compound:return jsonify({'reply':compound['error'],'local_query':True})
+            try:result=query_router.execute_ranked_comparison(compound,connect,source_reader=wren_daily_bridge.read_snapshot if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None)
+            except ValueError as exc:result={'reply':str(exc),'available':False}
+            result.pop('available',None)
+            return jsonify({**result,'local_query':True})
+        if route=='city_comparison':
+            if 'error' in route_plan:return jsonify({'reply':route_plan['error'],'local_query':True})
+            try:result=query_router.execute_city_comparison(route_plan,connect,source_reader=wren_daily_bridge.read_snapshot if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None)
+            except ValueError as exc:result={'reply':str(exc),'available':False}
+            if result.get('available'):
+                report_day=query_router._last_friday(route_plan['month'])
+                if os.environ.get('ZHIHUI_DATABASE')=='postgres':source_row=wren_daily_bridge.read_snapshot(report_day)
+                else:
+                    with connect() as c:source_row=c.execute('SELECT data,monthly_data,weekly,monthly FROM reports WHERE period=?',(report_day,)).fetchone()
+                if source_row:
+                    report_kind='monthly' if source_row[3] and source_row[1] else 'weekly' if source_row[2] else 'monthly'
+                    result['action']={'type':'open_reports','day':report_day,'kind':report_kind}
+            result.pop('available',None)
+            return jsonify({**result,'local_query':True})
+        if route=='suspension_reason':
+            reason_plan=route_plan
+            if 'error' in reason_plan:return jsonify({'reply':reason_plan['error'],'local_query':True})
+            result=query_router.execute_suspension_reasons(reason_plan,selected_suspension)
+            result.pop('available',None)
+            return jsonify({**result,'local_query':True})
+        if route=='analysis':
             plan=analysis_planner.create_plan(key,messages,model)
             if not plan:
                 return jsonify({'reply':'暂时无法可靠确定比较条件，请说明黑点解决率、地市和两个统计月份。','local_query':True})
@@ -642,27 +1066,29 @@ def assistant_query_chat():
             except ValueError as exc:result={'reply':str(exc),'available':False}
             result.pop('available',None)
             return jsonify({**result,'local_query':True})
-        if ranking_planner.should_plan(messages):
+        if route=='ranking':
             plan=ranking_planner.create_plan(key,messages,model)
             if not plan:return jsonify({'reply':'请说明排名方向、数量和统计月份，例如“2026年10月黑点解决率倒数前三”。','local_query':True})
             try:result=ranking_planner.execute(plan,connect,source_reader=wren_daily_bridge.read_snapshot if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None)
             except ValueError as exc:result={'reply':str(exc),'available':False}
+            context=guided_followup.context_for(messages[-1]['content'],plan,result)
+            if context:result['query_context']=context
             result.pop('available',None)
             return jsonify({**result,'local_query':True})
-        ranking=highest_resolution_plan(messages[-1]['content'])
-        if ranking:
+        if route=='highest_resolution':
+            ranking=route_plan
             if 'error' in ranking:return jsonify({'reply':ranking['error'],'local_query':True})
             result=highest_resolution(connect,ranking['month'],source_reader=wren_daily_bridge.read_snapshot if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None)
             result.pop('available',None)
             return jsonify({**result,'local_query':True})
-        comparison=network_query.comparison_plan(messages[-1]['content'])
-        if comparison:
+        if route=='network_comparison':
+            comparison=route_plan
             if 'error' in comparison:return jsonify({'reply':comparison['error'],'local_query':True})
             result=network_query.compare(connect,comparison,source_reader=wren_daily_bridge.read_rows if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None)
             result.pop('available',None)
             return jsonify({**result,'local_query':True})
-        overview_plan=network_query.overview_plan(messages)
-        if overview_plan:
+        if route=='network_overview':
+            overview_plan=route_plan
             if 'error' in overview_plan: return jsonify({'reply':overview_plan['error'],'local_query':True})
             result=network_query.overview(connect,overview_plan['day'],source_reader=wren_daily_bridge.read_rows if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None)
             if result.pop('available',False):
@@ -675,8 +1101,8 @@ def assistant_query_chat():
                     result['summary_notice']='AI 总结暂不可用，已显示本地汇总结果。'
                 result['reply']+='\n'+result.pop('coverage')
             return jsonify({**result,'local_query':True})
-        network_plan=network_query.local_plan(messages[-1]['content']) or query_context.resolve_network_followup(messages)
-        if network_plan:
+        if route=='network_metric':
+            network_plan=route_plan
             if 'error' in network_plan: return jsonify({'reply':network_plan['error'],'local_query':True})
             if not query_context.validate_network_plan(network_plan): return jsonify({'reply':'查询条件不完整，请确认日期、地市和指标。','local_query':True})
             try: result=network_query.query(connect,network_plan['arguments'],source_reader=wren_daily_bridge.read_rows if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None)
@@ -765,6 +1191,16 @@ def generate():
         if kind=='monthly' and (not legacy or not legacy.filename): raise ValueError('生成月报需要上传历史黑点工单进展表。')
         if not current.filename.lower().endswith('.xlsx') or (kind=='monthly' and not legacy.filename.lower().endswith('.xlsx')): raise ValueError('请上传 .xlsx 文件。')
         data=analyze(current.stream,legacy.stream if kind=='monthly' else None)
+        detail_records=None;detail_warning=''
+        try:
+            if blackspot_details.filename_date(current.filename)!=period:raise ValueError('文件名日期与统计日期不一致。')
+            current.stream.seek(0)
+            detail_records=blackspot_details.extract(current.stream)
+            if len(detail_records)!=data['total']['included']:
+                detail_records=None
+                raise ValueError('确认纳入数量与报告汇总不一致，请核对表格。')
+        except (ValueError,OSError,AttributeError) as exc:
+            detail_warning='区域明细未自动更新：'+str(exc)
         with connect() as c: row=c.execute('SELECT period,data FROM reports WHERE period < ? ORDER BY period DESC LIMIT 1',(period,)).fetchone()
         previous=None; previous_period=None
         if request.form.get('previous_included','').strip() or request.form.get('previous_qualified','').strip():
@@ -794,8 +1230,16 @@ def generate():
                 c.execute('INSERT INTO reports (period,data,notes,weekly,monthly,monthly_data) VALUES (?,?,?,?,?,?)',(period,encoded,encoded_notes,weekly if kind=='weekly' else '',monthly if kind=='monthly' else '',encoded if kind=='monthly' else None))
             generated_at=datetime.now().astimezone().isoformat(timespec='seconds')
             c.execute(f'UPDATE reports SET {kind}_generated_at=?, {kind}_updated_at=? WHERE period=?',(generated_at,generated_at,period))
+            blackspot_details.ensure(c)
+            if detail_records is not None:
+                try:blackspot_details.save(c,period,detail_records)
+                except blackspot_details.Conflict:
+                    c.execute('UPDATE blackspot_detail_snapshots SET stale=1 WHERE period=?',(period,))
+                    detail_warning='同日区域明细版本不同，已暂停展示；请在首页核对并导入对应工单表。'
+            else:c.execute('UPDATE blackspot_detail_snapshots SET stale=1 WHERE period=?',(period,))
         day=date.fromisoformat(period); last=date(day.year+int(day.month==12), day.month%12+1, 1)-timedelta(days=1); last_friday=last-timedelta(days=(last.weekday()-4)%7)
         warnings=[]
+        if detail_warning:warnings.append(detail_warning)
         if kind=='weekly' and previous is None: warnings.append('没有上周基准，本周新增和本周解决尚未计算；可补录后重新生成。')
         if kind=='monthly' and day != last_friday: warnings.append(f'{day:%Y年%m月}最后一个周五是 {last_friday}；当前版本用于月报时请核对。')
         warnings.append('报告中的文字说明需人工补充并审核。')
@@ -874,4 +1318,7 @@ def email_report(period):
     except (ValueError,TypeError,RuntimeError) as exc:
         return jsonify({'error':str(exc) or '邮件信息无效。'}),400
 
-if __name__=='__main__': app.run(host='127.0.0.1',port=5088,debug=False)
+if __name__=='__main__':
+    source=wren_daily_bridge.read_snapshot if os.environ.get('ZHIHUI_DATABASE')=='postgres' else None
+    city_alerts.start_worker(connect,source_reader=source,suspension_reader=selected_suspension)
+    app.run(host='127.0.0.1',port=5088,debug=False)

@@ -7,7 +7,6 @@ const ZhihuiCharts = (() => {
     return cities.filter(row=>row && typeof row.city==='string' && validCount(row.included) && validCount(row.qualified))
       .map(row=>({label:row.city,included:row.included,qualified:row.qualified}));
   }
-  const cityColors=['#6548c4','#168066','#b2565c','#2769a8','#a25719','#9145a7','#8c5e20','#187a8a','#a13d72','#49612a','#5e65b9','#9a4b2e','#286c57','#755076','#3a6990','#775f3e'];
   function historyModel(history){
     if(!Array.isArray(history)) return [];
     return history.filter(row=>row && typeof row.period==='string' && /^\d{4}-\d{2}-\d{2}$/.test(row.period) && Array.isArray(row.cities))
@@ -56,31 +55,25 @@ const ZhihuiCharts = (() => {
     const container=document.querySelector('#trend-chart'),empty=document.querySelector('#trend-chart-empty'),access=document.querySelector('#trend-chart-data'),legend=document.querySelector('#trend-city-legend');
     if(!container||!empty||!access||!legend)return;
     const rows=historyModel(history);container.replaceChildren();access.replaceChildren();legend.replaceChildren();
-    const present=new Set(rows.flatMap(row=>row.cities.map(city=>city.label)));
+    const latest=rows.at(-1),periodLabel=document.querySelector('#trend-chart-period');
+    if(periodLabel)periodLabel.textContent=latest?`${latest.label.slice(0,7)} · 统计日期 ${latest.label}`:'按月份查看各地市已保存的统计';
+    const present=new Set((latest?.cities||[]).map(city=>city.label));
     const order=(allCities.length?allCities:[...present]).filter(city=>present.has(city));
     const selected=selectedCity==='all'?order:order.filter(city=>city===selectedCity);
     if(!rows.length || !selected.length){empty.textContent=failed?'无法读取地市历史数据，请稍后重试。':'所选月份或地市暂无已保存的统计数据。';empty.hidden=false;container.hidden=true;return;}
     empty.hidden=true;container.hidden=false;
-    const values=rows.flatMap(row=>row.cities.filter(city=>selected.includes(city.label)).map(city=>city.rate*100));
-    const width=Math.max(620,rows.length*70+64),height=230,max=Math.max(100,Math.ceil(Math.max(...values)/20)*20);
-    const svg=node('svg',{viewBox:`0 0 ${width} ${height}`,style:`min-width:${width}px`,role:'img','aria-label':'所选月份各地市解决率趋势图，解决率为质检合格数除以确认纳入数'});
-    const f=plotFrame(svg,width,height,max,value=>`${value}%`),step=rows.length>1?(f.right-f.left)/(rows.length-1):0;
-    const xAt=i=>rows.length===1?(f.left+f.right)/2:f.left+i*step;
-    selected.forEach(cityName=>{
-      const index=allCities.length?allCities.indexOf(cityName):order.indexOf(cityName),color=cityColors[index%cityColors.length];
-      const item=htmlNode('span',cityName);item.className='trend-legend-item';item.style.setProperty('--series-color',color);legend.append(item);
-      let segment=[];
-      const flush=()=>{if(segment.length>1)svg.append(node('polyline',{points:segment.map(p=>p.join(',')).join(' '),fill:'none',stroke:color,'stroke-width':2.5,'stroke-linejoin':'round','stroke-linecap':'round'}));segment=[];};
-      rows.forEach((row,i)=>{
-        const city=row.cities.find(c=>c.label===cityName);
-        if(!city){flush();return;}
-        const x=xAt(i),y=f.bottom-city.rate*100/max*f.range,label=`${row.label} ${cityName}：解决率 ${(city.rate*100).toFixed(2)}%（质检合格 ${city.qualified} 处，确认纳入 ${city.included} 处）`;
-        segment.push([x,y]);
-        const point=node('circle',{cx:x,cy:y,r:4.5,fill:color,stroke:'#fff','stroke-width':1.5,tabindex:0,role:'img','aria-label':label});point.append(node('title',{},label));svg.append(point);
-        access.append(htmlNode('li',label));
-      });flush();
+    const values=selected.map(name=>latest.cities.find(city=>city.label===name));
+    const width=Math.max(620,values.length*72+65),height=300,max=Math.max(100,Math.ceil(Math.max(...values.map(city=>city.rate*100))/25)*25);
+    const svg=node('svg',{viewBox:`0 0 ${width} ${height}`,style:`min-width:${width}px`,role:'img','aria-label':`${latest.label}各地市黑点解决率柱状图`});
+    const top=32,bottom=height-42,left=62,right=width-16,range=bottom-top,step=(right-left)/values.length;
+    for(let i=0;i<=4;i++){const y=bottom-range*i/4;svg.append(node('line',{x1:left,y1:y,x2:right,y2:y,class:'rate-gridline'}),node('text',{x:left-10,y:y+4,'text-anchor':'end',class:'rate-tick'},`${max*i/4}%`));}
+    values.forEach((city,i)=>{
+      const rate=city.rate*100,cx=left+step*(i+.5),h=rate/max*range,barWidth=Math.min(52,step*.72),label=`${latest.label} ${city.label}：解决率 ${rate.toFixed(2)}%（质检合格 ${city.qualified} 处，确认纳入 ${city.included} 处）`;
+      const group=node('g',{class:'rate-bar-group',tabindex:0,role:'img','aria-label':label,'data-viz-tip':label});
+      group.append(node('title',{},label),node('rect',{x:cx-barWidth/2,y:bottom-h,width:barWidth,height:h,rx:6,class:'rate-bar'}),node('text',{x:cx,y:Math.max(18,bottom-h-9),'text-anchor':'middle',class:'rate-value'},`${rate.toFixed(2)}%`));
+      svg.append(group,node('text',{x:cx,y:height-14,'text-anchor':'middle',class:'rate-city'},city.label));
+      access.append(htmlNode('li',label));
     });
-    rows.forEach((row,i)=>svg.append(node('text',{x:xAt(i),y:height-10,'text-anchor':rows.length===1?'middle':i===0?'start':i===rows.length-1?'end':'middle',class:'chart-label'},row.label.slice(5))));
     container.append(svg);
   }
   return {citiesModel,historyModel,renderCities,renderHistory};

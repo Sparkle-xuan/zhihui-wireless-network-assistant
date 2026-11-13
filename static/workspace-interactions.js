@@ -1,0 +1,37 @@
+(()=>{'use strict';
+  // Navigation is deliberately restricted to known, local product pages.
+  const destinations=[
+    {label:'数据总览',hint:'首页与安徽地市地图',href:'/',keywords:'首页 大屏 地图'},
+    {label:'黑点周报与月报',hint:'导入工单、生成和编辑报告',href:'/reports',keywords:'黑点 周报 月报 excel'},
+    {label:'投诉分析',hint:'查询服务规范话术',href:'/complaints',keywords:'投诉 话术 查询'},
+    {label:'话术模拟',hint:'与模拟客服对话',href:'/complaints?section=simulate',keywords:'客服 聊天 模拟'},
+    {label:'挂起库推进',hint:'挂起分布、分类与诊断',href:'/suspension',keywords:'挂起 智能诊断'},
+    {label:'网络运行情况',hint:'网络日报与地市指标',href:'/network',keywords:'无线 日报 4g 5g'},
+    {label:'智能分析报告',hint:'查看和生成地市分析报告',href:'/analysis-report',keywords:'分析 html 报告'},
+    {label:'地市告警与推进',hint:'查看告警、提醒和跟进',href:'/city-alerts',keywords:'预警 告警 邮件 定时'},
+    {label:'问数测试台',hint:'使用模拟数据检查问数',href:'/assistant-evaluation',keywords:'问数 测试 反馈'}
+  ];
+  const make=(tag,cls,text)=>{const element=document.createElement(tag);if(cls)element.className=cls;if(text!==undefined)element.textContent=text;return element;};
+  const trigger=make('button','workspace-quick-trigger');trigger.type='button';trigger.setAttribute('aria-keyshortcuts','Control+K Meta+K');trigger.setAttribute('aria-haspopup','dialog');trigger.setAttribute('aria-label','快速前往，快捷键 Control 或 Command 加 K');
+  const triggerIcon=document.createElementNS('http://www.w3.org/2000/svg','svg');triggerIcon.setAttribute('viewBox','0 0 24 24');triggerIcon.setAttribute('aria-hidden','true');const circle=document.createElementNS('http://www.w3.org/2000/svg','circle');circle.setAttribute('cx','10.5');circle.setAttribute('cy','10.5');circle.setAttribute('r','6.5');const path=document.createElementNS('http://www.w3.org/2000/svg','path');path.setAttribute('d','m15.5 15.5 4 4');triggerIcon.append(circle,path);trigger.append(triggerIcon,make('span',null,'快速前往'),make('kbd',null,'Ctrl K'));
+  const nav=document.querySelector('.side-nav'),top=document.querySelector('header.top');if(nav)nav.after(trigger);else if(top)top.append(trigger);else return;
+  const dialog=make('dialog','workspace-palette');dialog.setAttribute('aria-labelledby','workspace-palette-title');dialog.innerHTML='<div class="workspace-palette-head"><div><strong id="workspace-palette-title">快速前往</strong><p>搜索页面或功能</p></div><button type="button" class="workspace-palette-close" aria-label="关闭快速前往">×</button></div><label class="workspace-palette-search"><span class="sr-only">搜索页面或功能</span><input type="search" placeholder="例如：挂起库、网络日报" autocomplete="off"></label><nav class="workspace-palette-results" aria-label="页面搜索结果"></nav><p class="workspace-palette-empty" role="status" hidden>没有找到对应页面，请换个词试试。</p><div class="workspace-palette-foot">输入关键词筛选 · Esc 关闭</div>';document.body.append(dialog);
+  const input=dialog.querySelector('input'),results=dialog.querySelector('nav'),empty=dialog.querySelector('.workspace-palette-empty');let previousFocus=null;
+  function hasUnsavedContent(){const reportDirty=window.ZhihuiReportState?window.ZhihuiReportState.hasUnsavedChanges():['weekly-save-status','monthly-save-status'].some(id=>/未保存|新的修改/.test(document.getElementById(id)?.textContent||''));return Boolean(reportDirty)||Boolean(document.querySelector('.complaint #description')?.value.trim()||document.querySelector('.complaint #guidance-output')?.value.trim()||document.querySelector('.simulation-row'));}
+  function filter(){const query=input.value.trim().toLowerCase();results.replaceChildren();const matched=destinations.filter(item=>(item.label+' '+item.hint+' '+item.keywords).toLowerCase().includes(query));for(const item of matched){const link=make('a','workspace-palette-item');link.href=item.href;link.addEventListener('click',event=>{if(event.button!==0||event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;if(window.ZhihuiReportState?.hasUnsavedChanges())return;/* beforeunload handles the report without a second prompt */if(hasUnsavedContent()&&!window.confirm('当前页面有尚未保存的内容，离开后可能丢失。确定继续吗？'))event.preventDefault();});const text=make('span','workspace-palette-item-text');text.append(make('strong',null,item.label),make('small',null,item.hint));const arrow=make('span','workspace-palette-arrow','›');arrow.setAttribute('aria-hidden','true');link.append(text,arrow);results.append(link);}empty.hidden=matched.length!==0;}
+  function open(){if(dialog.open)return;previousFocus=document.activeElement;input.value='';filter();if(typeof dialog.showModal==='function')dialog.showModal();else dialog.setAttribute('open','');input.focus();}
+  function close(){if(!dialog.open)return;if(typeof dialog.close==='function')dialog.close();else dialog.removeAttribute('open');if(previousFocus?.isConnected)previousFocus.focus();}
+  trigger.addEventListener('click',open);dialog.querySelector('.workspace-palette-close').addEventListener('click',close);dialog.addEventListener('click',event=>{if(event.target===dialog)close();});dialog.addEventListener('close',()=>{if(previousFocus?.isConnected)previousFocus.focus();});
+  input.addEventListener('input',filter);input.addEventListener('keydown',event=>{if(event.key==='ArrowDown'){const first=results.querySelector('a');if(first){event.preventDefault();first.focus();}}else if(event.key==='Enter'){const first=results.querySelector('a');if(first){event.preventDefault();first.click();}}});
+  document.addEventListener('keydown',event=>{if(event.key==='Escape'&&dialog.open&&typeof dialog.close!=='function'){event.preventDefault();close();return;}const target=event.target;if(event.isComposing||event.defaultPrevented||event.altKey||!(event.ctrlKey||event.metaKey)||event.key.toLowerCase()!=='k'||target?.isContentEditable||/^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName||''))return;event.preventDefault();open();});
+
+  // Let the selected segment move without replacing the existing controls or state.
+  for(const [selector,buttons] of [['.complaint-tabs','button[data-section]'],['.tabs','button[data-tab]']]){
+    const group=document.querySelector(selector);if(!group)continue;const items=Array.from(group.querySelectorAll(buttons));if(!items.length)continue;const indicator=make('span','workspace-segment-indicator');indicator.setAttribute('aria-hidden','true');group.prepend(indicator);group.classList.add('workspace-segmented');let frame=0;
+    const refresh=()=>{cancelAnimationFrame(frame);frame=requestAnimationFrame(()=>{const active=items.find(item=>item.classList.contains('active'));if(!active||!group.offsetWidth||!active.offsetWidth){indicator.hidden=true;return;}indicator.hidden=false;indicator.style.width=active.offsetWidth+'px';indicator.style.height=active.offsetHeight+'px';indicator.style.transform=`translate(${active.offsetLeft}px,${active.offsetTop}px)`;items.forEach(item=>item.setAttribute('aria-pressed',String(item===active)));});};
+    const observer=new MutationObserver(refresh);items.forEach(item=>observer.observe(item,{attributes:true,attributeFilter:['class']}));if('ResizeObserver'in window)new ResizeObserver(refresh).observe(group);else window.addEventListener('resize',refresh);refresh();
+  }
+
+  // Loading placeholders retain the original live-region text and never imply values.
+  for(const id of ['brief-content','dash-local-summary','dash-ranking','history']){const element=document.getElementById(id);if(!element)continue;const refresh=()=>{const text=element.textContent.trim();element.classList.toggle('workspace-loading',text.length<55&&/^正在(读取|加载|核对|汇总)/.test(text));};new MutationObserver(refresh).observe(element,{childList:true,characterData:true,subtree:true});refresh();}
+})();

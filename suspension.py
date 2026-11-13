@@ -183,6 +183,23 @@ def local_diagnostic_advice(evidence):
     return '以下为依据关键词初筛生成的本地参考建议，具体方案需结合实际判断。\n'+'\n'.join(paragraphs)
 
 
+def city_opportunities(current,city):
+    """Show only saved, city-level keyword and same-record cross summaries."""
+    if city not in CITIES:raise ValueError('请选择有效地市。')
+    reason=current.get('reason_analysis')
+    if not isinstance(reason,dict):return {'available':False,'message':'该版本未保存原因汇总，请补充同一统计日期的原表。' if current.get('period') else '该版本未保存原因汇总，且缺少原表统计日期，暂无法安全补充。'}
+    rows=sorted((r for r in reason.get('cities',[]) if r.get('city')==city),key=lambda r:-r['value'])
+    issue=reason.get('issue') or {}
+    issues=sorted((r for r in issue.get('cities',[]) if r.get('city')==city),key=lambda r:-r['value']) if issue.get('available') else []
+    joints=sorted((r for r in reason.get('issue_suspension_cities',[]) if r.get('city')==city),key=lambda r:-r['value'])
+    categories=sorted((r for r in reason.get('city_categories',[]) if r.get('city')==city),key=lambda r:-r['value'])
+    evidence={'cities_complete':True,'reasons':{'cities':rows,'issue':{'cities':issues},'issue_suspension_cities':joints}}
+    return {'available':True,'city':city,'period':current.get('period'),'source':current.get('kind'),
+            'reasons':rows,'issues':issues,'same_record':joints,'categories':categories,
+            'advice':local_diagnostic_advice(evidence),
+            'note':'关键词初筛可能重叠，不能作为已确认原因；跨字段关联仅统计同一条记录。'}
+
+
 def workbook_summary(source, provisional=False):
     """Extract only suspension aggregates; do not retain work orders or the workbook."""
     from collections import Counter

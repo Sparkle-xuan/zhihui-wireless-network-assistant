@@ -6,6 +6,7 @@ from datetime import date, timedelta
 from fractions import Fraction
 from core import CITIES, STAGES
 from network_query import NETWORK_TOOL
+import blackspot_history
 
 METRICS=('解决率','确认纳入数','质检合格数','汇聚黑点量','平台关联投诉量','已纳入关联投诉量','关联投诉量','项目进展')
 SCALAR_FIELDS={'汇聚黑点量':('platform','处'),'平台关联投诉量':('platform_complaints','件'),'已纳入关联投诉量':('complaints','件')}
@@ -82,9 +83,11 @@ def _city(value):
     return value
 
 def query(connect, name, arguments, *, structured=False, source_reader=None, suspension_reader=None):
+    source_info=None
     def output(reply,headers=None,rows=None,footnote=None,available=True):
         if not structured: return reply
         result={'reply':reply,'available':available}
+        if source_info:result['source_info']=source_info
         if headers is not None: result['table']={'headers':headers,'rows':rows,'footnote':footnote}
         return result
     if name not in ('query_city_metrics','query_suspended') or not isinstance(arguments,dict):
@@ -112,18 +115,19 @@ def query(connect, name, arguments, *, structured=False, source_reader=None, sus
                 return output(f'{arguments["month"]}全省挂起库累计{total:g}处，已记录地市情况如下。', ['地市','挂起库数量（处）'],table_rows,footnote)
             if city not in distribution:return output(f'{arguments["month"]}{city}市挂起数量未提供，无法查询。',available=False)
             return output(f'{arguments["month"]}{city}市挂起库累计{distribution[city]:g}处。\n{provenance}')
-    if source_reader:
-        row=source_reader(period)
+    if name=='query_city_metrics':
+        row,source_info=blackspot_history.resolve(connect,arguments['month'],period,source_reader)
+        if source_info:period=source_info['period']
+    elif source_reader:row=source_reader(period)
     else:
-        with connect() as c:
-            row=c.execute('SELECT data,monthly_data,weekly,monthly FROM reports WHERE period=?',(period,)).fetchone()
+        with connect() as c:row=c.execute('SELECT data,monthly_data,weekly,monthly FROM reports WHERE period=?',(period,)).fetchone()
     if not row or not (row[2] or row[3]):
         return output(f'{arguments["month"]}缺少最后一个周五（{period}）的报告统计，请导入该期工单表生成报告。',available=False)
     try:
         snapshot=json.loads(row[1] if row[3] and row[1] else row[0])
         if not isinstance(snapshot,dict): raise ValueError()
     except (ValueError,TypeError): raise ValueError('该期统计数据格式异常，请核对报告。')
-    kind='月报' if row[3] and row[1] else '周报' if row[2] else '月报'
+    kind=source_info['kind'] if source_info else ('月报' if row[3] and row[1] else '周报' if row[2] else '月报')
     title=f'{arguments["month"]}统计（数据日期：{period}；采用{kind}快照）'
     if name=='query_city_metrics':
         if city=='全省': entries=[('全省',snapshot.get('total'))]
@@ -249,8 +253,8 @@ def highest_resolution(connect,month,*,source_reader=None):
     best=max(r[0] for r in ranking);winners=[r for r in ranking if r[0]==best]
     names='、'.join(r[1]+'市' for r in winners)
     detail='；'.join(f'{city}质检合格{passed}处／确认纳入{base}处' for _,city,base,passed in winners)
-    period=_last_friday(month)
+    source=result['source_info'];period=source['period']
     reply=f"截至{period}，{month}黑点解决率最高的是{names}，{'并列' if len(winners)>1 else ''}{float(best)*100:.2f}%。{detail}。"
     note='解决率＝质检合格数÷确认纳入数；按未四舍五入的比率判断并列。'
     if excluded:note+='确认纳入为零的地市不参与排名：'+'、'.join(excluded)+'。'
-    return {'reply':reply,'evidence':note+' 数据日期：'+period+'。','table':result['table'],'available':True}
+    return {'reply':reply,'evidence':note+' 数据日期：'+period+'（'+source['kind']+'）。','table':result['table'],'available':True}

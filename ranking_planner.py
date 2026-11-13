@@ -100,5 +100,5 @@ def execute(plan,connect,*,source_reader=None):
     extra='；末位并列，一并列出' if len(selected)>count else ''
     note='按未四舍五入的解决率计算；解决率＝质检合格数÷确认纳入数。'
     if excluded:note+='无纳入黑点不参与排名：'+'、'.join(excluded)+'。'
-    period=_last_friday(plan['month'])
-    return {'reply':f"截至{period}，{plan['month']}黑点解决率{label}的{count}个地市：{listing}{extra}。",'available':True,'table':{'headers':['名次','地市','解决率','质检合格（处）','确认纳入（处）'],'rows':rows,'footnote':note},'evidence':f'统计日期：{period}。'+note}
+    source=result['source_info'];period=source['period']
+    return {'reply':f"截至{period}，{plan['month']}黑点解决率{label}的{count}个地市：{listing}{extra}。",'available':True,'table':{'headers':['名次','地市','解决率','质检合格（处）','确认纳入（处）'],'rows':rows,'footnote':note},'evidence':f"统计日期：{period}（{source['kind']}）。"+note,'source_info':source}

@@ -28,7 +28,7 @@
   <aside class="sidebar" aria-label="主导航">
     <div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><div><strong>智徽</strong><small>无线网络感知分析助手</small></div></div>
     <div class="nav-label">工作台</div>
-    <nav class="side-nav">
+    <nav class="side-nav"><a href="/"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span>数据总览</span></a>
       <a class="selected" href="#reports" aria-current="page"><svg><use href="#i-report"/></svg><span>黑点周报与月报</span></a>
       <a href="/complaints"><svg><use href="#i-chat"/></svg><span>投诉分析</span></a>
       <a href="/suspension"><svg><use href="#i-grid"/></svg><span>挂起库推进</span></a>
@@ -37,7 +37,9 @@
     <div class="sidebar-note"><div class="note-dot"></div><div><strong>本地试运行</strong><small>原始文件不保存</small></div></div>
   </aside>
   <main id="reports" class="main-content">
-    <header class="page-header"><div><div class="breadcrumb">黑点管理 <span>/</span> 报告生成</div><div class="page-title"><span class="title-mark" aria-hidden="true"><i></i><i></i></span><h1>黑点周报与月报</h1></div><p>汇总工单数据，生成并核对重点投诉区域报告。</p></div><span class="local-badge"><span></span> 本地工作台</span></header>
+    <header class="page-header"><div><div class="breadcrumb">黑点管理 <span>/</span> 报告生成</div><div class="page-title"><span class="title-mark" aria-hidden="true"><i></i><i></i></span><h1>黑点周报与月报</h1></div><p>汇总工单数据，生成并核对重点投诉区域报告。</p><p><a href="/analysis-report">生成月度智能分析报告 →</a></p></div><span class="local-badge"><span></span> 本地工作台</span></header>
+
+    <section class="intelligence-brief panel" aria-labelledby="brief-title"><div class="brief-heading"><div><h2 id="brief-title">本期值得关注</h2><p>基于已保存汇总，在本机计算并展示统计依据。</p></div><div class="brief-controls"><label>统计月份 <input id="brief-month" type="month"></label><button type="button" id="brief-refresh">查看</button></div></div><div id="brief-content" role="status" aria-live="polite">正在读取关注事项…</div><div class="brief-links"><a href="/city-alerts#followups">查看推进跟踪</a><a href="/assistant-evaluation">打开问数测试台</a></div></section>
 
     <div class="workspace-top">
       <section class="panel import-panel" aria-labelledby="import-title">
@@ -78,12 +80,12 @@
       <div class="analytics-heading"><div><h2 id="analytics-title">统计图表</h2><p>基于报告统计结果展示，便于对比和查看变化</p></div><span class="analytics-badge">真实统计数据</span></div>
       <div class="charts-grid">
         <section class="chart-card" aria-labelledby="city-chart-title"><div class="chart-heading"><div><h3 id="city-chart-title">地市处理情况</h3><p>当前报告 · 单位：处<span id="city-chart-period"></span></p></div><span class="chart-icon"><svg><use href="#i-chart"/></svg></span></div><div class="chart-legend"><span class="legend-included">确认纳入</span><span class="legend-qualified">质检合格</span></div><div class="chart-area"><p class="chart-empty" id="city-chart-empty">生成或打开报告后，显示各地市统计。</p><div class="chart-viewport chart-scroll" id="city-chart" hidden></div><ul class="sr-only" id="city-chart-data" aria-label="地市统计数据"></ul></div></section>
-        <section class="chart-card" aria-labelledby="trend-chart-title"><div class="chart-heading"><div><h3 id="trend-chart-title">地市解决率趋势</h3><p>查看所选月份内各地市已保存的统计 · 单位：%</p></div><span class="chart-icon mint-icon"><svg><use href="#i-chart"/></svg></span></div><div class="trend-filters"><label>月份<input id="trend-month" type="month" aria-label="选择趋势月份"></label><label>地市<select id="trend-city" aria-label="选择趋势地市"><option value="all">全部地市</option></select></label></div><div class="trend-legend" id="trend-city-legend" aria-label="地市图例"></div><div class="chart-area"><p class="chart-empty" id="trend-chart-empty">所选月份暂无已保存的统计数据。</p><div class="chart-viewport chart-trend" id="trend-chart" hidden></div><ul class="sr-only" id="trend-chart-data" aria-label="地市历史解决率数据"></ul></div><p class="chart-footnote">解决率 = 质检合格数 ÷ 确认纳入数；分母为 0 时显示 0%。已保存期次等间距展示，缺失数据不补零；同日优先使用周报统计。</p></section>
+        <section class="chart-card rate-compare-card" aria-labelledby="trend-chart-title"><div class="rate-compare-header"><div class="rate-compare-title"><h3 id="trend-chart-title">地市解决率对比</h3><p id="trend-chart-period">按月份查看各地市已保存的统计</p></div><div class="trend-filters"><label>月份<input id="trend-month" type="month" aria-label="选择统计月份"></label><label>地市<select id="trend-city" aria-label="选择统计地市"><option value="all">全部地市</option></select></label></div></div><div class="trend-legend" id="trend-city-legend" hidden></div><div class="chart-area rate-chart-area"><p class="chart-empty" id="trend-chart-empty">所选月份暂无已保存的统计数据。</p><div class="chart-viewport chart-trend" id="trend-chart" hidden></div><ul class="sr-only" id="trend-chart-data" aria-label="地市解决率统计数据"></ul></div><p class="chart-footnote rate-chart-note"><span aria-hidden="true">ⓘ</span> 解决率 = 质检合格数 ÷ 确认纳入数；分母为 0 时显示 0%。展示当月最近一次已保存的统计，同日优先使用周报。</p></section>
       </div>
     </section>
     <div class="page-footer">智徽 · 无线网络感知分析助手 <span>仅在本机处理数据</span></div>
   </main>
 </div>
 {% include '_assistant.html' %}
-<script src="/static/report-date.js"></script><script src="/static/charts.js"></script><script src="/static/trend.js"></script><script src="/static/app.js"></script><script src="/static/database-settings.js"></script><script src="/static/assistant-utils.js"></script><script src="/static/assistant.js"></script>
+<script src="/static/report-date.js"></script><script src="/static/charts.js"></script><script src="/static/trend.js"></script><script src="/static/app.js"></script><script src="/static/intelligence-brief.js"></script><script src="/static/database-settings.js"></script><script src="/static/assistant-utils.js"></script><script src="/static/assistant.js"></script>
 </body></html>
